@@ -47,6 +47,7 @@ RUN DL="curl -fL --retry 5 --retry-delay 5 --retry-all-errors -o" \
 # Sanity checks at build time (file sizes + CPU-only import of the code we call).
 RUN ls -l ${CKPT}/*/* && test $(stat -c %s ${CKPT}/body_models/smplx/SMPLX_NEUTRAL.npz) -gt 100000000 \
     && test $(stat -c %s ${CKPT}/vitpose/vitpose-h-multi-coco.pth) -gt 2000000000 \
+    && /usr/bin/ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 \
     && python -c "import pytorch3d, smplx, chumpy, ultralytics, hydra, scipy, runpod; print('imports ok')"
 
 COPY handler.py smpl_bvh.py /workspace/

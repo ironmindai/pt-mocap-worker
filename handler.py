@@ -33,6 +33,8 @@ SMPLX_NPZ = os.path.join(GVHMR_DIR, "inputs/checkpoints/body_models/smplx/SMPLX_
 MAX_VIDEO_BYTES = int(os.environ.get("MAX_VIDEO_BYTES", 500_000_000))
 MAX_SECONDS = float(os.environ.get("MAX_SECONDS", 120))  # longer videos are truncated
 MODEL_FPS = 30
+# Debian build with libx264; conda's minimal ffmpeg in the base image may shadow the one on PATH.
+FFMPEG = os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg")
 
 _state = {}
 
@@ -99,7 +101,7 @@ def fetch_video(inp, dest):
 
 def normalize_video(src, dst):
     """Re-encode to constant 30 fps, even dimensions, no audio, capped length (GVHMR assumes 30 fps)."""
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src, "-t", str(MAX_SECONDS), "-an",
+    cmd = [FFMPEG, "-y", "-loglevel", "error", "-i", src, "-t", str(MAX_SECONDS), "-an",
            "-vf", f"fps={MODEL_FPS},scale=trunc(iw/2)*2:trunc(ih/2)*2",
            "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", dst]
     p = subprocess.run(cmd, capture_output=True, text=True)
