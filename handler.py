@@ -8,10 +8,14 @@ Input:
   static_cam    bool, default false. True skips visual odometry (tripod / fixed camera).
   f_mm          optional full-frame-equivalent focal length in mm (GVHMR --f_mm).
   bvh_scale     float, default 1.0. BVH units = meters * bvh_scale (use 100 for centimeters).
+  gender        "neutral" (default) | "male" | "female": SMPL body model used for the GLB mesh. Falls back to
+                neutral if that model file is unavailable; the model used is reported as "gender_used".
+  smoothing     "medium" (default) | "light" | "strong" | "off": quaternion Savitzky-Golay smoothing of the
+                pose / root translation before export (applies to both BVH and GLB).
   return_smpl   bool, default false. Also return the raw SMPL-X params as base64 npz ("smpl_npz_b64").
 
 Output:
-  {"bvh_b64", "fps", "n_frames", "duration_s", "elapsed_s", ...}   or   {"error": "..."}
+  {"bvh_b64", "glb_b64", "gender_used", "smoothing", "fps", "n_frames", "duration_s", "elapsed_s", ...}   or   {"error": "..."}
 """
 import base64
 import importlib.util
@@ -34,6 +38,9 @@ SMPLX_NPZ = os.path.join(GVHMR_DIR, "inputs/checkpoints/body_models/smplx/SMPLX_
 MAX_VIDEO_BYTES = int(os.environ.get("MAX_VIDEO_BYTES", 500_000_000))
 MAX_SECONDS = float(os.environ.get("MAX_SECONDS", 120))  # longer videos are truncated
 MODEL_FPS = 30
+SMPL_DIR = os.path.join(GVHMR_DIR, "inputs/checkpoints/body_models/smpl")
+GENDERS = ("neutral", "male", "female")
+SMOOTHING = ("off", "light", "medium", "strong")
 # Debian build with libx264; conda's minimal ffmpeg in the base image may shadow the one on PATH.
 FFMPEG = os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg")
 
@@ -84,6 +91,23 @@ def _patch_simple_vo():
             return np.eye(4)
 
     cls.solve = safe_solve
+
+
+def get_smpl_model(gender):
+    """Return (model, gender_used); falls back to neutral if the requested gender file is missing/unreadable."""
+    from smpl_glb import load_smpl_pkl
+
+    for g in ([gender, "neutral"] if gender != "neutral" else ["neutral"]):
+        key = ("smpl", g)
+        if key in _state:
+            return _state[key], g
+        path = os.path.join(SMPL_DIR, f"SMPL_{g.upper()}.pkl")
+        try:
+            _state[key] = load_smpl_pkl(path)
+            return _state[key], g
+        except Exception as e:  # noqa: BLE001
+            print(f"[smpl] could not load {path}: {type(e).__name__}: {e}", flush=True)
+    raise RuntimeError("no SMPL body model could be loaded")
 
 
 def _compose(compose, init, name, root, static_cam, f_mm):
@@ -161,6 +185,12 @@ def handler(job):
         static_cam = bool(inp.get("static_cam", False))
         f_mm = int(inp["f_mm"]) if inp.get("f_mm") is not None else None
         scale = float(inp.get("bvh_scale", 1.0))
+        gender = str(inp.get("gender", "neutral")).lower()
+        if gender not in GENDERS:
+            raise ValueError(f"gender must be one of {GENDERS}")
+        smoothing = str(inp.get("smoothing", "medium")).lower()
+        if smoothing not in SMOOTHING:
+            raise ValueError(f"smoothing must be one of {SMOOTHING}")
         name = "job_" + (str(job.get("id") or uuid.uuid4()).replace("-", "")[:16])
 
         raw, norm = os.path.join(work, "raw_video"), os.path.join(work, "norm.mp4")
@@ -179,12 +209,15 @@ def handler(job):
             # Typical: no person detected / tracker returned nothing.
             raise RuntimeError(f"GVHMR inference failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")
 
+        from motion import smooth_motion
         from smpl_bvh import smpl_to_bvh
 
+        # Smooth at the native 30 fps, then subsample.
+        go, bp, tr = smooth_motion(params["global_orient"], params["body_pose"], params["transl"], smoothing)
         sel = slice(None, None, stride)
         fps = MODEL_FPS / stride
-        go, bp, tr = params["global_orient"][sel], params["body_pose"][sel], params["transl"][sel]
-        bvh_text = smpl_to_bvh(go, bp, tr, params["betas"], SMPLX_NPZ, fps, scale)
+        go, bp, tr, betas = go[sel], bp[sel], tr[sel], params["betas"][sel]
+        bvh_text = smpl_to_bvh(go, bp, tr, betas, SMPLX_NPZ, fps, scale)
         n = int(go.shape[0])
         out = {
             "bvh_b64": base64.b64encode(bvh_text.encode()).decode(),
@@ -192,8 +225,17 @@ def handler(job):
             "n_frames": n,
             "duration_s": round(n / fps, 3),
             "skeleton": "SMPL-22 (Y-up, +Z forward, meters*bvh_scale)",
-            "elapsed_s": round(time.time() - t0, 1),
+            "smoothing": smoothing,
         }
+        try:
+            from smpl_glb import smpl_to_glb
+
+            model, used = get_smpl_model(gender)
+            out["glb_b64"] = base64.b64encode(smpl_to_glb(model, go, bp, tr, betas, fps)).decode()
+            out["gender_used"] = used
+        except Exception as e:  # noqa: BLE001  (GLB failure must not lose the BVH)
+            out["glb_error"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"[-3000:]
+        out["elapsed_s"] = round(time.time() - t0, 1)
         if inp.get("return_smpl"):
             buf = io.BytesIO()
             np.savez_compressed(buf, global_orient=go, body_pose=bp, transl=tr, betas=params["betas"][sel], fps=fps)

@@ -37,6 +37,10 @@ ENV CKPT=${GVHMR_DIR}/inputs/checkpoints
 RUN mkdir -p ${CKPT}/body_models/smpl ${CKPT}/body_models/smplx ${CKPT}/gvhmr ${CKPT}/hmr2 ${CKPT}/vitpose ${CKPT}/yolo \
     && DL="curl -fL --retry 5 --retry-delay 5 --retry-all-errors -o" \
     && $DL ${CKPT}/body_models/smpl/SMPL_NEUTRAL.pkl   ${SMPL_MIRROR}/4_SMPLhub/SMPL/X_pkl/SMPL_NEUTRAL.pkl \
+    && for g in MALE FEMALE; do \
+         $DL ${CKPT}/body_models/smpl/SMPL_$g.pkl ${SMPL_MIRROR}/4_SMPLhub/SMPL/X_pkl/SMPL_$g.pkl \
+         || { echo "WARNING: SMPL_$g.pkl unavailable, handler falls back to neutral"; rm -f ${CKPT}/body_models/smpl/SMPL_$g.pkl; }; \
+       done \
     && $DL ${CKPT}/body_models/smplx/SMPLX_NEUTRAL.npz ${SMPL_MIRROR}/4_SMPLhub/SMPLX/X_npz/SMPLX_NEUTRAL.npz \
     && $DL ${CKPT}/gvhmr/gvhmr_siga24_release.ckpt     ${GVHMR_MIRROR}/gvhmr/gvhmr_siga24_release.ckpt \
     && $DL ${CKPT}/yolo/yolov8x.pt                     ${GVHMR_MIRROR}/yolo/yolov8x.pt
@@ -50,5 +54,5 @@ RUN ls -l ${CKPT}/*/* && test $(stat -c %s ${CKPT}/body_models/smplx/SMPLX_NEUTR
     && /usr/bin/ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 \
     && python -c "import pytorch3d, smplx, chumpy, ultralytics, hydra, scipy, runpod; print('imports ok')"
 
-COPY handler.py smpl_bvh.py /workspace/
+COPY handler.py smpl_bvh.py smpl_glb.py motion.py /workspace/
 CMD ["python", "-u", "/workspace/handler.py"]

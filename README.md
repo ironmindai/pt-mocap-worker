@@ -17,14 +17,43 @@ Input (`input` object of a RunPod job):
 | `static_cam` | bool | false | true skips visual odometry (tripod / fixed camera): faster and recommended for tripod footage. |
 | `f_mm` | int | null | Full-frame-equivalent focal length in mm, if the camera is zoomed in. |
 | `bvh_scale` | float | 1.0 | BVH units = meters * scale (100 gives centimeters). |
-| `return_smpl` | bool | false | Also return raw params as `smpl_npz_b64`. |
+| `gender` | `neutral` / `male` / `female` | neutral | SMPL body model used for the GLB mesh and its skinning. Falls back to neutral if that model file is unavailable. |
+| `smoothing` | `off` / `light` / `medium` / `strong` | medium | Temporal smoothing of pose and root translation before export (see below). |
+| `return_smpl` | bool | false | Also return the (smoothed, un-rebased) params as `smpl_npz_b64`. |
 
 Output:
 
 ```json
-{"bvh_b64": "...", "fps": 30.0, "n_frames": 150, "duration_s": 5.0,
+{"bvh_b64": "...", "glb_b64": "...", "gender_used": "neutral", "smoothing": "medium",
+ "fps": 30.0, "n_frames": 150, "duration_s": 5.0,
  "skeleton": "SMPL-22 (Y-up, +Z forward, meters*bvh_scale)", "elapsed_s": 41.2}
 ```
+
+If the GLB step fails the response still carries the BVH and a `glb_error` string instead of `glb_b64`.
+
+### Smoothing
+
+Applied at the native 30 fps (before `frame_stride` subsampling). Each joint rotation becomes a quaternion, sign
+continuity is enforced (flip when dot < 0), a Savitzky-Golay filter (polyorder 2) runs per component, and the
+result is renormalized. Windows: light 5, medium 7, strong 11 frames; root translation gets a gentler window
+(5 / 7 / 9). Windows shrink automatically for very short clips. `off` returns the raw GVHMR motion (use it to get
+unsmoothed output; BVH and GLB are both built from the same smoothed motion).
+
+### GLB details
+
+A skinned, animated glTF 2.0 binary (built in `smpl_glb.py`, no Blender):
+
+- Mesh: SMPL body, 6890 vertices, one primitive, shaped with GVHMR's betas; skin-tone PBR material
+  (baseColor 0.80/0.62/0.52, metallic 0, roughness 0.6, single sided).
+- Skeleton: 24 SMPL joints as glTF nodes (node index = SMPL joint index, pelvis is the root; hand joints stay at
+  identity). Inverse bind matrices are translations by minus the shaped rest-pose joints.
+- Skinning: SMPL LBS weights pruned to the top 4 influences per vertex (renormalized) in `JOINTS_0` / `WEIGHTS_0`.
+  SMPL pose-corrective blendshapes cannot be expressed in glTF skinning and are omitted.
+- Animation: one LINEAR rotation track per joint (quaternions, local) plus a root translation track, at output fps.
+- Conventions as BVH: Y-up, meters, facing +Z at frame 0, start at XZ origin, lowest foot over the clip on y = 0.
+- Shape caveat: GVHMR predicts SMPL-X (neutral) betas; they are applied to the chosen SMPL model's shape space,
+  so proportions are close but not identical to the SMPL-X body. `gender` selects the model, it does not estimate gender.
+- BVH skeleton rest offsets still come from the neutral SMPL-X model.
 
 Errors are returned as `{"error": "..."}` (e.g. bad input, undecodable video, no person detected); unexpected failures include the full Python traceback.
 
@@ -67,7 +96,7 @@ Visual odometry uses GVHMR's default SimpleVO (SIFT); DPVO is not installed.
 | file | source |
 |---|---|
 | `gvhmr/gvhmr_siga24_release.ckpt`, `hmr2/epoch=10-step=25000.ckpt`, `vitpose/vitpose-h-multi-coco.pth`, `yolo/yolov8x.pt` | HuggingFace mirror [`ryanrudes/gvhmr`](https://huggingface.co/ryanrudes/gvhmr) (pinned commit), mirror of the official Google-Drive release |
-| `body_models/smplx/SMPLX_NEUTRAL.npz`, `body_models/smpl/SMPL_NEUTRAL.pkl` | HuggingFace [`lithiumice/models_hub`](https://huggingface.co/lithiumice/models_hub) (`4_SMPLhub/...`, pinned commit). Ungated community mirror of the SMPL/SMPL-X files |
+| `body_models/smplx/SMPLX_NEUTRAL.npz`, `body_models/smpl/SMPL_{NEUTRAL,MALE,FEMALE}.pkl` (all three verified present on the mirror; male/female are the original 247 MB v1.1.0 files) | HuggingFace [`lithiumice/models_hub`](https://huggingface.co/lithiumice/models_hub) (`4_SMPLhub/...`, pinned commit). Ungated community mirror of the SMPL/SMPL-X files |
 
 Licensing: SMPL / SMPL-X are distributed by the Max Planck Institute under a registration-gated license
 (non-commercial research unless a commercial license is obtained); GVHMR and the other checkpoints are
@@ -76,6 +105,12 @@ pipeline, and prefer swapping in files from your own registered download (change
 `curl` lines in the Dockerfile).
 
 ## Test
+
+Unit tests (GLB builder, smoothing, BVH; no GPU or weights needed):
+`pip install numpy scipy pygltflib pytest && python -m pytest tests -q`
+(set `SMPL_PKL=/path/to/SMPL_NEUTRAL.pkl` to also run against the real SMPL model).
+
+Endpoint test:
 
 Deploy the image as a RunPod serverless endpoint (GPU with >= 24 GB recommended; container disk ~25 GB), then:
 
