@@ -221,3 +221,66 @@ def test_real_smpl_model():
     glb = smpl_glb.smpl_to_glb(model, *motion(3), fps=30.0)
     js, _ = parse_glb(glb)
     assert js["accessors"][js["meshes"][0]["primitives"][0]["attributes"]["POSITION"]]["count"] == 6890
+
+
+def onehot_model():
+    """Vertex i is skinned 100% to joint i and placed at joint i (i < 24); 6 extra vertices on the pelvis."""
+    m = fake_model_fixed()
+    w = np.zeros((30, 24))
+    w[np.arange(24), np.arange(24)] = 1
+    w[24:, 0] = 1
+    m["v_template"][24:] = [0.0, -0.2, 0.0]
+    m["weights"] = w
+    return m
+
+
+def test_clothing_regions_by_gender():
+    m = onehot_model()
+    J = REST24
+    for gender, has_top in (("male", False), ("female", True), ("neutral", True)):
+        _, lab = smpl_glb.clothing_colors(m["v_template"], m["faces"], J, m["weights"], gender, feather=0)
+        assert lab[1] == 1 and lab[2] == 1       # hips above the 60% hip->knee hem: shorts
+        assert lab[0] == 2                        # pelvis at top edge of shorts: waistband
+        assert lab[4] == 0 and lab[5] == 0        # knees below the hem: skin
+        assert lab[16] == 0 and lab[18] == 0      # shoulders / arms stay skin
+        assert lab[3] == 0                        # spine1 below chest cutoff
+        assert (lab[[6, 9]] == 3).all() == has_top and (lab[[6, 9]] == 0).all() == (not has_top)
+
+
+def test_color0_in_glb(tmp_path):
+    m = onehot_model()
+    glb = smpl_glb.smpl_to_glb(m, *motion(2), fps=30.0, gender="female")
+    js, b = parse_glb(glb)
+    prim = js["meshes"][0]["primitives"][0]
+    a = js["accessors"][prim["attributes"]["COLOR_0"]]
+    assert a["count"] == 30 and a["type"] == "VEC4" and a["componentType"] == 5126
+    bv = js["bufferViews"][a["bufferView"]]
+    assert bv["byteOffset"] % 4 == 0 and bv["byteLength"] == 30 * 16
+    col = np.frombuffer(b, "<f4", count=30 * 4, offset=bv["byteOffset"]).reshape(30, 4)
+    assert (col >= 0).all() and (col <= 1).all() and np.allclose(col[:, 3], 1)
+    skin = np.array(smpl_glb.SKIN)
+    is_skin = np.isclose(col[:, :3], skin, atol=0.2).all(1)
+    assert is_skin.any() and (~is_skin).any()          # both skin and clothing present
+    assert js["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"] == [1.0, 1.0, 1.0, 1.0]
+    p = tmp_path / "c.glb"
+    p.write_bytes(glb)
+    g = pygltflib.GLTF2().load(str(p))
+    assert g.meshes[0].primitives[0].attributes.COLOR_0 == prim["attributes"]["COLOR_0"]
+
+
+def test_feather_keeps_range_and_softens():
+    m = onehot_model()
+    hard, _ = smpl_glb.clothing_colors(m["v_template"], m["faces"], REST24, m["weights"], "female", feather=0)
+    soft, _ = smpl_glb.clothing_colors(m["v_template"], m["faces"], REST24, m["weights"], "female", feather=1)
+    assert soft.min() >= 0 and soft.max() <= 1 and not np.allclose(hard, soft)
+
+
+@pytest.mark.skipif(not os.environ.get("SMPL_PKL"), reason="SMPL_PKL not set")
+def test_real_model_clothing_counts():
+    m = smpl_glb.load_smpl_pkl(os.environ["SMPL_PKL"])
+    J = m["J_regressor"] @ m["v_template"]
+    _, lab = smpl_glb.clothing_colors(m["v_template"], m["faces"], J, m["weights"], "neutral", feather=0)
+    n = np.bincount(lab, minlength=4)
+    assert n[1] > 300 and n[2] > 20 and n[3] > 300 and n[0] > 4000
+    _, lab_m = smpl_glb.clothing_colors(m["v_template"], m["faces"], J, m["weights"], "male", feather=0)
+    assert (lab_m == 3).sum() == 0

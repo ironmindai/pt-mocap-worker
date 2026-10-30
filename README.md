@@ -39,12 +39,28 @@ result is renormalized. Windows: light 5, medium 7, strong 11 frames; root trans
 (5 / 7 / 9). Windows shrink automatically for very short clips. `off` returns the raw GVHMR motion (use it to get
 unsmoothed output; BVH and GLB are both built from the same smoothed motion).
 
+### Clothing (painted-on vertex colors)
+
+Regions come from the model's own rest pose and skinning weights (dominant joint per vertex), so they follow body
+shape. Colors are softened with one 1-ring smoothing pass.
+
+| region | rule | color |
+|---|---|---|
+| shorts (all genders) | dominant joint pelvis / left hip / right hip (0, 1, 2), above 60% of the way from hip to knee joint (mid-thigh hem) | deep red `#8C1D18` |
+| waistband | top 4 cm of the shorts | gold `#C9A227` |
+| sports top (female and neutral, not male) | dominant joint spine1/2/3 (3, 6, 9) above the lower-chest cutoff (40% of the way from spine1 to spine2 joint upward); arms, shoulders, neck excluded | dark charcoal `#2B2D31` |
+| everything else | skin | skin tone (linear 0.80, 0.62, 0.52) |
+
+Vertex counts on the real neutral SMPL model (before smoothing): skin 5328, shorts 646, waistband 70, top 846.
+Male: skin 6188, shorts 645, waistband 57, top 0.
+
 ### GLB details
 
 A skinned, animated glTF 2.0 binary (built in `smpl_glb.py`, no Blender):
 
-- Mesh: SMPL body, 6890 vertices, one primitive, shaped with GVHMR's betas; skin-tone PBR material
-  (baseColor 0.80/0.62/0.52, metallic 0, roughness 0.6, single sided).
+- Mesh: SMPL body, 6890 vertices, one primitive, shaped with GVHMR's betas. Look is driven by a `COLOR_0`
+  vertex attribute (float RGBA, linear); the PBR material is white (baseColorFactor 1,1,1,1), metallic 0,
+  roughness 0.6, single sided. three.js GLTFLoader applies COLOR_0 automatically.
 - Skeleton: 24 SMPL joints as glTF nodes (node index = SMPL joint index, pelvis is the root; hand joints stay at
   identity). Inverse bind matrices are translations by minus the shaped rest-pose joints.
 - Skinning: SMPL LBS weights pruned to the top 4 influences per vertex (renormalized) in `JOINTS_0` / `WEIGHTS_0`.

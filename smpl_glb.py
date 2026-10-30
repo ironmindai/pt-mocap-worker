@@ -21,8 +21,72 @@ JOINT_NAMES_24 = [
     "R_Elbow", "L_Wrist", "R_Wrist", "L_Hand", "R_Hand",
 ]
 PARENTS_24 = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19, 20, 21]
-SKIN_RGBA = [0.80, 0.62, 0.52, 1.0]
 ROUGHNESS = 0.6
+
+
+def _srgb_to_linear(hex_color):
+    c = np.array([int(hex_color[i:i + 2], 16) for i in (1, 3, 5)], dtype=np.float64) / 255.0
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+# glTF vertex colors / baseColorFactor are linear.
+SKIN = np.array([0.80, 0.62, 0.52])
+SHORTS = _srgb_to_linear("#8C1D18")
+WAISTBAND = _srgb_to_linear("#C9A227")
+TOP = _srgb_to_linear("#2B2D31")  # dark charcoal
+SHORTS_JOINTS = (0, 1, 2)
+TOP_JOINTS = (3, 6, 9)
+SHORTS_HEM_T = 0.6  # shorts end 60% of the way from hip joint to knee joint
+WAISTBAND_M = 0.04  # waistband height below the top edge of the shorts
+
+
+def clothing_colors(verts, faces, joints, weights, gender="neutral", feather=1):
+    """Painted-on clothing as per-vertex linear RGBA, derived from rest pose + skinning weights.
+
+    Shorts (all genders): vertices whose dominant joint is pelvis / hips, above 60% of the hip->knee drop, with a
+    gold waistband strip at the top edge. Sports top (female and neutral): vertices dominated by spine joints
+    above the lower-chest cutoff (arms / shoulders / neck stay skin). Rest is skin.
+    Returns (colors (V,4) float32, region labels (V,) uint8: 0 skin, 1 shorts, 2 waistband, 3 top).
+    """
+    verts, joints, weights = np.asarray(verts), np.asarray(joints), np.asarray(weights)
+    V = len(verts)
+    dom = weights.argmax(axis=1)
+    y = verts[:, 1]
+    label = np.zeros(V, dtype=np.uint8)
+
+    # Shorts: hem per leg (pelvis-dominated vertices use the side of the body they are on).
+    side_left = verts[:, 0] >= joints[0, 0]  # SMPL left is +X
+    hip_y = np.where(side_left, joints[1, 1], joints[2, 1])
+    knee_y = np.where(side_left, joints[4, 1], joints[5, 1])
+    hem_y = hip_y + SHORTS_HEM_T * (knee_y - hip_y)
+    shorts = np.isin(dom, SHORTS_JOINTS) & (y >= hem_y)
+    label[shorts] = 1
+    if shorts.any():
+        label[shorts & (y >= y[shorts].max() - WAISTBAND_M)] = 2
+
+    if gender in ("female", "neutral"):
+        cut = joints[3, 1] + 0.6 * (joints[6, 1] - joints[3, 1])
+        label[np.isin(dom, TOP_JOINTS) & (y >= cut)] = 3
+
+    palette = np.stack([SKIN, SHORTS, WAISTBAND, TOP])
+    rgb = palette[label]
+    for _ in range(feather):
+        rgb = _feather(rgb, faces)
+    rgba = np.concatenate([rgb, np.ones((V, 1))], axis=1).astype(np.float32)
+    return rgba, label
+
+
+def _feather(rgb, faces, amount=0.5):
+    """One 1-ring smoothing pass of vertex colors (softens region boundaries)."""
+    V = len(rgb)
+    faces = np.asarray(faces, dtype=np.int64)
+    acc, cnt = np.zeros_like(rgb), np.zeros(V)
+    for a, b in ((0, 1), (1, 2), (2, 0)):
+        for i, j in ((a, b), (b, a)):
+            np.add.at(acc, faces[:, i], rgb[faces[:, j]])
+            np.add.at(cnt, faces[:, i], 1)
+    mean = np.where(cnt[:, None] > 0, acc / np.maximum(cnt[:, None], 1), rgb)
+    return (1 - amount) * rgb + amount * mean
 
 
 class _Stub:
@@ -86,11 +150,11 @@ def _pad4(b, pad=b"\0"):
     return b + pad * (-len(b) % 4)
 
 
-def build_glb(verts, faces, joints, parents, weights, quats, root_pos, fps, names=None):
+def build_glb(verts, faces, joints, parents, weights, quats, root_pos, fps, names=None, colors=None):
     """Assemble a skinned, animated GLB and return its bytes.
 
     verts (V,3) rest mesh; faces (F,3); joints (J,3) rest joint positions; parents (J,) with -1 for root;
-    weights (V,J) LBS weights; quats (T,J,4) local rotations xyzw; root_pos (T,3) root node translation; fps float.
+    weights (V,J) LBS weights; colors optional (V,4) linear RGBA -> COLOR_0; quats (T,J,4) local rotations xyzw; root_pos (T,3) root node translation; fps float.
     """
     verts = np.asarray(verts, dtype=np.float32)
     faces = np.asarray(faces, dtype=np.uint32)
@@ -125,6 +189,7 @@ def build_glb(verts, faces, joints, parents, weights, quats, root_pos, fps, name
     a_nrm = add(_normals(verts.astype(np.float64), faces).astype(np.float32), FLOAT, V, "VEC3", 34962)
     a_jnt = add(jidx, USHORT, V, "VEC4", 34962)
     a_wgt = add(jw, FLOAT, V, "VEC4", 34962)
+    a_col = add(np.asarray(colors, dtype=np.float32), FLOAT, V, "VEC4", 34962) if colors is not None else None
     a_idx = add(faces.reshape(-1), UINT, faces.size, "SCALAR", 34963)
     a_ibm = add(ibm, FLOAT, J, "MAT4")
     a_time = add(times, FLOAT, T, "SCALAR", None, ([float(times.min())], [float(times.max())]))
@@ -148,16 +213,20 @@ def build_glb(verts, faces, joints, parents, weights, quats, root_pos, fps, name
         samplers.append({"input": a_time, "output": a_rot[j], "interpolation": "LINEAR"})
         channels.append({"sampler": len(samplers) - 1, "target": {"node": j, "path": "rotation"}})
 
+    attrs = {"POSITION": a_pos, "NORMAL": a_nrm, "JOINTS_0": a_jnt, "WEIGHTS_0": a_wgt}
+    if a_col is not None:
+        attrs["COLOR_0"] = a_col
+    # With vertex colors the look is driven by COLOR_0 (final = baseColorFactor * COLOR_0).
+    base_color = [1.0, 1.0, 1.0, 1.0] if a_col is not None else list(SKIN) + [1.0]
     gltf = {
         "asset": {"version": "2.0", "generator": "pt-mocap-worker"},
         "scene": 0,
         "scenes": [{"nodes": [J, 0]}],
         "nodes": nodes,
         "meshes": [{"name": "SMPL", "primitives": [{
-            "attributes": {"POSITION": a_pos, "NORMAL": a_nrm, "JOINTS_0": a_jnt, "WEIGHTS_0": a_wgt},
-            "indices": a_idx, "material": 0, "mode": 4}]}],
+            "attributes": attrs, "indices": a_idx, "material": 0, "mode": 4}]}],
         "materials": [{"name": "skin", "doubleSided": False, "pbrMetallicRoughness": {
-            "baseColorFactor": SKIN_RGBA, "metallicFactor": 0.0, "roughnessFactor": ROUGHNESS}}],
+            "baseColorFactor": base_color, "metallicFactor": 0.0, "roughnessFactor": ROUGHNESS}}],
         "skins": [{"joints": list(range(J)), "inverseBindMatrices": a_ibm, "skeleton": 0}],
         "animations": [{"name": "motion", "samplers": samplers, "channels": channels}],
         "accessors": accessors,
@@ -171,7 +240,7 @@ def build_glb(verts, faces, joints, parents, weights, quats, root_pos, fps, name
             + struct.pack("<I4s", len(bb), b"BIN\0") + bb)
 
 
-def smpl_to_glb(model, global_orient, body_pose, transl, betas, fps):
+def smpl_to_glb(model, global_orient, body_pose, transl, betas, fps, gender="neutral", clothing=True):
     """SMPL(-X body) pose sequence -> GLB bytes. `model` comes from load_smpl_pkl.
 
     global_orient (T,3), body_pose (T,63) axis-angle, transl (T,3) meters, betas (10,) or (T,10).
@@ -192,4 +261,13 @@ def smpl_to_glb(model, global_orient, body_pose, transl, betas, fps):
     for t in range(1, T):  # sign continuity so slerp takes the short way
         flip = (q[t] * q[t - 1]).sum(-1) < 0
         q[t][flip] = -q[t][flip]
-    return build_glb(verts, model["faces"], joints, PARENTS_24, model["weights"], q, root, fps, JOINT_NAMES_24)
+    colors = None
+    if clothing:
+        colors, _ = clothing_colors(verts, model["faces"], joints, model["weights"], gender)
+        if colors is not None and not clothing_is_visible(colors):
+            colors = np.concatenate([np.tile(SKIN, (len(verts), 1)), np.ones((len(verts), 1))], axis=1)
+    return build_glb(verts, model["faces"], joints, PARENTS_24, model["weights"], q, root, fps, JOINT_NAMES_24, colors)
+
+
+def clothing_is_visible(colors):
+    return bool(np.ptp(colors[:, :3], axis=0).max() > 1e-3)

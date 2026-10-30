@@ -231,7 +231,7 @@ def handler(job):
             from smpl_glb import smpl_to_glb
 
             model, used = get_smpl_model(gender)
-            out["glb_b64"] = base64.b64encode(smpl_to_glb(model, go, bp, tr, betas, fps)).decode()
+            out["glb_b64"] = base64.b64encode(smpl_to_glb(model, go, bp, tr, betas, fps, used)).decode()
             out["gender_used"] = used
         except Exception as e:  # noqa: BLE001  (GLB failure must not lose the BVH)
             out["glb_error"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"[-3000:]
