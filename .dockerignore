@@ -1,0 +1,6 @@
+.git
+.github
+README.md
+test_local.py
+__pycache__
+*.bvh
