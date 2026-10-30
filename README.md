@@ -14,7 +14,7 @@ Input (`input` object of a RunPod job):
 | `video_url` | string | - | https URL. One of `video_url` / `video_b64` is required. |
 | `video_b64` | string | - | base64 of the video file (mind RunPod's request size limit; prefer URLs). |
 | `frame_stride` | int >= 1 | 1 | Keep every Nth frame of the output. Output fps = 30 / stride. GVHMR always runs at 30 fps internally. |
-| `static_cam` | bool | false | true skips visual odometry (tripod / fixed camera). |
+| `static_cam` | bool | false | true skips visual odometry (tripod / fixed camera): faster and recommended for tripod footage. |
 | `f_mm` | int | null | Full-frame-equivalent focal length in mm, if the camera is zoomed in. |
 | `bvh_scale` | float | 1.0 | BVH units = meters * scale (100 gives centimeters). |
 | `return_smpl` | bool | false | Also return raw params as `smpl_npz_b64`. |
@@ -26,7 +26,9 @@ Output:
  "skeleton": "SMPL-22 (Y-up, +Z forward, meters*bvh_scale)", "elapsed_s": 41.2}
 ```
 
-Errors are returned as `{"error": "..."}` (e.g. bad input, undecodable video, no person detected).
+Errors are returned as `{"error": "..."}` (e.g. bad input, undecodable video, no person detected); unexpected failures include the full Python traceback.
+
+Camera motion: with `static_cam` false, GVHMR's SimpleVO (SIFT + pycolmap) estimates camera rotation. Frame pairs where pycolmap cannot recover a pose (static / low-texture scenes) are treated as no camera motion instead of crashing.
 
 Limits (env overridable): `MAX_VIDEO_BYTES` 500 MB, `MAX_SECONDS` 120 (longer videos are truncated).
 The video is re-encoded with ffmpeg to constant 30 fps first, so variable/60 fps sources are handled.

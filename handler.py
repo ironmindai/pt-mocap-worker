@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import traceback
 import time
 import urllib.parse
 import urllib.request
@@ -53,6 +54,7 @@ def _load():
     demo = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(demo)
     register_store_gvhmr()
+    _patch_simple_vo()
 
     cfg = _compose(compose, initialize_config_module, "warmup", "/tmp/gvhmr_warmup", False, None)
     model = hydra.utils.instantiate(cfg.model, _recursive_=False)
@@ -60,6 +62,28 @@ def _load():
     model = model.eval().cuda()
     _state.update(demo=demo, model=model, compose=compose, init=initialize_config_module, torch=torch)
     return _state
+
+
+def _patch_simple_vo():
+    """Make SimpleVO tolerate pairs where pycolmap cannot recover a relative pose.
+
+    pycolmap returns cam2_from_cam1=None when two-view geometry fails (too few matches/inliers, e.g. a
+    static or low-texture scene), and GVHMR then crashes with "'NoneType' object has no attribute 'matrix'".
+    Treat such a pair as "no camera motion" (identity), which is the right default for a mostly fixed camera.
+    """
+    from hmr4d.utils.preproc.relpose import solver_two_view as stv
+
+    cls = stv.PycolmapRansacTwoViewGeometrySolver
+    orig = cls.solve
+
+    def safe_solve(self, pts0, pts1):
+        try:
+            return orig(self, pts0, pts1)
+        except Exception as e:  # noqa: BLE001
+            print(f"[SimpleVO] pair failed ({type(e).__name__}: {e}); assuming identity", flush=True)
+            return np.eye(4)
+
+    cls.solve = safe_solve
 
 
 def _compose(compose, init, name, root, static_cam, f_mm):
@@ -153,7 +177,7 @@ def handler(job):
             raise
         except Exception as e:
             # Typical: no person detected / tracker returned nothing.
-            raise RuntimeError(f"GVHMR inference failed: {type(e).__name__}: {e}")
+            raise RuntimeError(f"GVHMR inference failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")
 
         from smpl_bvh import smpl_to_bvh
 
@@ -178,7 +202,9 @@ def handler(job):
     except (ValueError, KeyError, TypeError) as e:
         return {"error": f"bad request: {e}"}
     except Exception as e:
-        return {"error": str(e)[:1500]}
+        tb = traceback.format_exc()
+        print(tb, flush=True)
+        return {"error": f"{e}\n{tb}"[-6000:]}
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
