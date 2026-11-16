@@ -324,7 +324,7 @@ def handle_multi(inp, job, work, norm, name, t0):
                "params_npz_b64": base64.b64encode(buf.getvalue()).decode()}
         try:  # ground-aligned stand-alone preview GLB
             if scene and not inp.get("return_persons"):
-                raise StopIteration (own origin / heading), person-coloured shorts
+                raise StopIteration
             go, bp, tr = smooth_motion(glo["global_orient"], glo["body_pose"], glo["transl"], smoothing)
             model_smpl, used = get_smpl_model(gender)
             res["glb_b64"] = base64.b64encode(smpl_to_glb(
