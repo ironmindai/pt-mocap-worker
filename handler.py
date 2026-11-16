@@ -13,6 +13,11 @@ Input:
   smoothing     "medium" (default) | "light" | "strong" | "off": quaternion Savitzky-Golay smoothing of the
                 pose / root translation before export (applies to both BVH and GLB).
   return_smpl   bool, default false. Also return the raw SMPL-X params as base64 npz ("smpl_npz_b64").
+  hands         bool, default false (output identical to before). True adds HaMeR finger-pose estimation: the GLB mesh
+                becomes SMPL-X (22 body + 30 animated finger joints, same vertex-colour painting, same ground alignment);
+                works for glb_b64, per-person glb_b64 and scene_glb_b64. BVH is unchanged. If hand estimation fails the
+                normal (SMPL) output is returned with "hands_error".
+  return_hands  bool, default false. With hands: also return "hands_npz_b64" (per-person finger poses, see README).
 
 Multi-person mode (lab branch; single-person behaviour above is unchanged when none of these is given):
   list_tracks   bool. Run only the YOLO+ByteTrack pass and return {"tracks": [...], "n_frames", "width", "height"}
@@ -104,6 +109,87 @@ def _patch_simple_vo():
     cls.solve = safe_solve
 
 
+def _hands_models():
+    """Lazy: HaMeR + MANO prior + numpy SMPL-X (only touched when hands=true)."""
+    if "hands" in _state:
+        return _state["hands"]
+    import hamer_infer
+    import hands as H
+    import smplx_np as sx
+
+    est = hamer_infer.HandEstimator(device="cuda")
+    prior = H.HandPrior.from_mano_pkl(os.path.join(hamer_infer.HAMER_DATA, "_DATA/data/mano/MANO_RIGHT.pkl"))
+    smplx_model = sx.load_smplx_npz(SMPLX_NPZ)
+    _state["hands"] = (est, prior, smplx_model)
+    return _state["hands"]
+
+
+def _video_frames_rgb(path):
+    import cv2
+
+    cap = cv2.VideoCapture(path)
+    try:
+        while True:
+            ok, fr = cap.read()
+            if not ok:
+                return
+            yield fr[:, :, ::-1]
+    finally:
+        cap.release()
+
+
+def compute_hands(norm_video, people, K, width, height, job=None):
+    """people: list of dicts with incam_global_orient (T,3), incam_body_pose (T,63), incam_betas, incam_transl, observed (T,).
+    Returns (list of dicts left_aa/right_aa (T,15,3) SMPL-X convention, weights (T,2), raw ..., info)."""
+    import hands as H
+    import hands_pipeline as hp
+    import smplx_np as sx
+
+    est, prior, mdl = _hands_models()
+    persons = []
+    for d in people:
+        betas = np.asarray(d["incam_betas"], dtype=np.float64).reshape(-1, 10).mean(0)
+        rots = sx.rots_from_params(d["incam_global_orient"], d["incam_body_pose"])
+        _, J = sx.rest_shape(mdl, betas)
+        root = J[0][None] + np.asarray(d["incam_transl"], dtype=np.float64)
+        _, j52 = sx.posed(mdl, betas, rots, root, vert_idx=np.arange(1))
+        persons.append({"joints52": j52, "rots": rots, "observed": d.get("observed")})
+    ests, info = hp.estimate_hands(_video_frames_rgb(norm_video), persons, est, prior, np.asarray(K, dtype=np.float64),
+                                   width, height)
+    neutral_r = mdl["hands_mean_r"]
+    res = []
+    for e in ests:
+        left, right, w = hp.fuse_person(e, neutral_r, prior)
+        res.append({"left_aa": left, "right_aa": right, "weight": w, "raw_aa": e["raw_aa"], "conf": e["conf"],
+                    "agree_deg": e["agree_deg"], "sharp": e["sharp"], "kp_img": e["kp_img"], "vis": e["vis"]})
+    info["mean_weight"] = [[round(float(x), 3) for x in r["weight"].mean(0)] for r in res]
+    return res, info
+
+
+def hands_npz(res, fps, stride=1):
+    """base64 npz: per person p{i}_{left,right}_hand_pose (T,15,3) SMPL-X axis-angle (fused), p{i}_weight (T,2) final blend
+    weight [L,R] (1 = estimate, 0 = relaxed neutral), p{i}_conf_raw (T,2), p{i}_raw_{left,right} (T,15,3) unfused, p{i}_kp_img
+    (T,2,21,2) HaMeR keypoints in image px, p{i}_agree_deg (T,2); neutral_hand_{left,right}; fps."""
+    import hands as H
+    import smplx_np as sx
+
+    mdl = _hands_models()[2]
+    arr = {"fps": np.float64(fps), "neutral_hand_left": H.to_smplx_pose(mdl["hands_mean_r"], True),
+           "neutral_hand_right": mdl["hands_mean_r"], "stride": np.int64(stride)}
+    for i, r in enumerate(res):
+        arr[f"p{i}_left_hand_pose"] = r["left_aa"]
+        arr[f"p{i}_right_hand_pose"] = r["right_aa"]
+        arr[f"p{i}_weight"] = r["weight"]
+        arr[f"p{i}_conf_raw"] = r["conf"]
+        arr[f"p{i}_raw_left"] = H.to_smplx_pose(r["raw_aa"][:, 0], True)
+        arr[f"p{i}_raw_right"] = r["raw_aa"][:, 1]
+        arr[f"p{i}_kp_img"] = r["kp_img"]
+        arr[f"p{i}_agree_deg"] = r["agree_deg"]
+    buf = io.BytesIO()
+    np.savez_compressed(buf, **arr)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 def get_smpl_model(gender):
     """Return (model, gender_used); falls back to neutral if the requested gender file is missing/unreadable."""
     from smpl_glb import load_smpl_pkl
@@ -168,7 +254,7 @@ def normalize_video(src, dst):
         raise ValueError("could not decode video: " + p.stderr[-300:])
 
 
-def run_gvhmr(video_path, workdir, name, static_cam, f_mm):
+def run_gvhmr(video_path, workdir, name, static_cam, f_mm, with_incam=False):
     st = _load()
     demo, torch = st["demo"], st["torch"]
     cfg = _compose(st["compose"], st["init"], name, workdir, static_cam, f_mm)
@@ -182,7 +268,10 @@ def run_gvhmr(video_path, workdir, name, static_cam, f_mm):
         data = demo.load_data_dict(cfg)
         pred = st["model"].predict(data, static_cam=cfg.static_cam)
     pred = demo.detach_to_cpu(pred)
-    return {k: v.numpy() for k, v in pred["smpl_params_global"].items()}
+    glob = {k: v.numpy() for k, v in pred["smpl_params_global"].items()}
+    if with_incam:
+        return glob, {k: v.numpy() for k, v in pred["smpl_params_incam"].items()}, pred["K_fullimg"][0].numpy()
+    return glob
 
 
 PERSON_COLORS = ["#C0201A", "#1F4FC4", "#1E8E3E", "#C98A00"]  # red, blue, green, amber
@@ -228,6 +317,7 @@ def handle_multi(inp, job, work, norm, name, t0):
     if gender not in GENDERS:
         raise ValueError(f"gender must be one of {GENDERS}")
     colors = inp.get("person_colors") or PERSON_COLORS
+    want_hands = bool(inp.get("hands"))
     from hmr4d.utils.video_io_utils import get_video_lwh
 
     n_frames, width, height = get_video_lwh(norm)
@@ -281,7 +371,7 @@ def handle_multi(inp, job, work, norm, name, t0):
     from motion import smooth_motion
     from smpl_glb import smpl_to_glb
 
-    results, slam_src, scene_people = [], None, []
+    results, slam_src, scene_people, hand_people, glob_params = [], None, [], [], []
     for i, (ids, bbx, observed) in enumerate(persons):
         t_p = time.time()
         try:
@@ -314,6 +404,9 @@ def handle_multi(inp, job, work, norm, name, t0):
             arrs["joints24_incam"] = j24
         buf = io.BytesIO()
         np.savez_compressed(buf, **arrs)
+        if want_hands:
+            hand_people.append({**{f"incam_{k}": v for k, v in inc.items()}, "observed": observed})
+            glob_params.append(glo)
         if scene:
             if j24 is None:
                 raise RuntimeError("scene: joints24_incam could not be computed")
@@ -323,7 +416,7 @@ def handle_multi(inp, job, work, norm, name, t0):
                "bbox_xyxy": np.round(bbx, 1).tolist(), "color": colors[i % len(colors)],
                "params_npz_b64": base64.b64encode(buf.getvalue()).decode()}
         try:  # ground-aligned stand-alone preview GLB
-            if scene and not inp.get("return_persons"):
+            if (scene and not inp.get("return_persons")) or want_hands:  # hands: GLB is built after hand estimation
                 raise StopIteration
             go, bp, tr = smooth_motion(glo["global_orient"], glo["body_pose"], glo["transl"], smoothing)
             model_smpl, used = get_smpl_model(gender)
@@ -339,6 +432,43 @@ def handle_multi(inp, job, work, norm, name, t0):
         results.append(res)
         torch.cuda.empty_cache()
     out["K_fullimg"] = K.tolist()
+    hands_res = None
+    if want_hands:
+        try:
+            try:
+                runpod.serverless.progress_update(job, "estimating hands")
+            except Exception:
+                pass
+            hands_res, hinfo = compute_hands(norm, hand_people, K, width, height, job)
+            out["hands"] = hinfo
+            if inp.get("return_hands"):
+                out["hands_npz_b64"] = hands_npz(hands_res, MODEL_FPS)
+            if not scene or inp.get("return_persons"):
+                import smplx_np as sx
+
+                mdl = _hands_models()[2]
+                for i, (r, gl, hr) in enumerate(zip(results, glob_params, hands_res)):
+                    go, bp, tr = smooth_motion(gl["global_orient"], gl["body_pose"], gl["transl"], smoothing)
+                    betas = np.asarray(gl["betas"], dtype=np.float64).reshape(-1, 10).mean(0)
+                    r["glb_b64"] = base64.b64encode(sx.person_glb_ground(
+                        mdl, betas, go, bp, tr, hr["left_aa"], hr["right_aa"], MODEL_FPS, color=colors[i % len(colors)],
+                        top=False, gender="male")).decode()
+                    r["gender_used"] = "neutral (SMPL-X)"
+        except Exception as e:  # noqa: BLE001  (hand failure must not lose the body result)
+            hands_res = None
+            out["hands_error"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"[-3000:]
+            print(out["hands_error"], flush=True)
+            for i, (r, gl) in enumerate(zip(results, glob_params)):  # fall back to the plain SMPL preview GLB
+                if (not scene or inp.get("return_persons")) and "glb_b64" not in r:
+                    try:
+                        go, bp, tr = smooth_motion(gl["global_orient"], gl["body_pose"], gl["transl"], smoothing)
+                        model_smpl, used = get_smpl_model(gender)
+                        r["glb_b64"] = base64.b64encode(smpl_to_glb(
+                            model_smpl, go, bp, tr, gl["betas"], MODEL_FPS, used, shorts_color=colors[i % len(colors)],
+                            top=False)).decode()
+                        r["gender_used"] = used
+                    except Exception as e2:  # noqa: BLE001
+                        r["glb_error"] = f"{type(e2).__name__}: {e2}"[-1500:]
     if scene:
         import scene as scn
 
@@ -348,7 +478,9 @@ def handle_multi(inp, job, work, norm, name, t0):
         model_smpl, used = get_smpl_model(str(inp.get("scene_gender", "neutral")).lower())
         glb, meta = scn.build_scene(
             model_smpl, scene_people, K, MODEL_FPS, smoothing, colors=inp.get("person_colors") or scn.DEFAULT_COLORS,
-            track_ids=[p[0] for p in persons], observed=[p[2] for p in persons], bboxes=[p[1] for p in persons])
+            track_ids=[p[0] for p in persons], observed=[p[2] for p in persons], bboxes=[p[1] for p in persons],
+            hands=([(h["left_aa"], h["right_aa"]) for h in hands_res] if hands_res is not None else None),
+            smplx_model=(_hands_models()[2] if hands_res is not None else None))
         meta.update(width=width, height=height, gender_used=used, static_cam=static_cam, scene_s=round(time.time() - t_s, 1))
         out["scene_glb_b64"] = base64.b64encode(glb).decode()
         out["scene_meta"] = meta
@@ -392,8 +524,16 @@ def handler(job):
             runpod.serverless.progress_update(job, "running GVHMR")
         except Exception:
             pass
+        want_hands = bool(inp.get("hands"))
+        norm_copy = None
+        if want_hands:  # run_gvhmr moves the video away; keep a copy for the hand pass
+            norm_copy = os.path.join(work, "norm_hands.mp4")
+            shutil.copy(norm, norm_copy)
         try:
-            params = run_gvhmr(norm, work, name, static_cam, f_mm)
+            if want_hands:
+                params, inc_params, K_img = run_gvhmr(norm, work, name, static_cam, f_mm, with_incam=True)
+            else:
+                params = run_gvhmr(norm, work, name, static_cam, f_mm)
         except ValueError:
             raise
         except Exception as e:
@@ -418,12 +558,38 @@ def handler(job):
             "skeleton": "SMPL-22 (Y-up, +Z forward, meters*bvh_scale)",
             "smoothing": smoothing,
         }
+        hands_done = False
+        if want_hands:
+            try:
+                import smplx_np as sx
+                from hmr4d.utils.video_io_utils import get_video_lwh
+
+                try:
+                    runpod.serverless.progress_update(job, "estimating hands")
+                except Exception:
+                    pass
+                _, width, height = get_video_lwh(norm_copy)
+                hp_in = [{**{f"incam_{k}": v for k, v in inc_params.items()}, "observed": np.ones(len(go), dtype=bool)}]
+                hres, hinfo = compute_hands(norm_copy, hp_in, K_img, width, height, job)
+                out["hands"] = hinfo
+                hr = hres[0]
+                if inp.get("return_hands"):
+                    out["hands_npz_b64"] = hands_npz(hres, MODEL_FPS, stride)
+                mdl = _hands_models()[2]
+                out["glb_b64"] = base64.b64encode(sx.person_glb_ground(
+                    mdl, np.asarray(betas, dtype=np.float64).reshape(-1, 10).mean(0), go, bp, tr, hr["left_aa"][sel], hr["right_aa"][sel], fps, top=None, gender=gender)).decode()
+                out["gender_used"] = "neutral (SMPL-X body model; gender affects clothing only)"
+                hands_done = True
+            except Exception as e:  # noqa: BLE001  (hand failure falls back to the plain SMPL GLB)
+                out["hands_error"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"[-3000:]
+                print(out["hands_error"], flush=True)
         try:
             from smpl_glb import smpl_to_glb
 
-            model, used = get_smpl_model(gender)
-            out["glb_b64"] = base64.b64encode(smpl_to_glb(model, go, bp, tr, betas, fps, used)).decode()
-            out["gender_used"] = used
+            if not hands_done:
+                model, used = get_smpl_model(gender)
+                out["glb_b64"] = base64.b64encode(smpl_to_glb(model, go, bp, tr, betas, fps, used)).decode()
+                out["gender_used"] = used
         except Exception as e:  # noqa: BLE001  (GLB failure must not lose the BVH)
             out["glb_error"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"[-3000:]
         out["elapsed_s"] = round(time.time() - t0, 1)

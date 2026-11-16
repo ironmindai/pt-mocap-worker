@@ -223,9 +223,19 @@ def build_person_glb(model, betas, rots, root, color, fps):
     return sg.build_glb(v, model["faces"], J, P, model["weights"], to_quats(rots), root, fps, sg.JOINT_NAMES_24, colors)
 
 
+def finger_rots(left_aa, right_aa):
+    """(T,15,3) x2 absolute SMPL-X axis-angle -> (T,30,3,3) local rotations in SMPL-X finger order (left 15, right 15)."""
+    T = len(left_aa)
+    aa = np.concatenate([np.asarray(left_aa), np.asarray(right_aa)], 1)
+    return R.from_rotvec(aa.reshape(-1, 3)).as_matrix().reshape(T, 30, 3, 3)
+
+
 def build_scene(model, persons, K, fps, smoothing="medium", colors=None, track_ids=None, observed=None, bboxes=None,
-                percentile=10):
-    """persons: list of dicts (see person_motion / gravity_up_cam, plus incam_betas). Returns (glb_bytes, meta dict)."""
+                percentile=10, hands=None, smplx_model=None):
+    """persons: list of dicts (see person_motion / gravity_up_cam, plus incam_betas). Returns (glb_bytes, meta dict).
+    hands: optional list (per person) of (left_aa, right_aa) SMPL-X finger poses (T,15,3). With hands the figures are
+    SMPL-X meshes (`smplx_model` from smplx_np.load_smplx_npz) with 30 animated finger joints; body motion, pelvis track,
+    gravity and floor are computed exactly as for SMPL (same root / body rotations / floor height)."""
     colors = list(colors or DEFAULT_COLORS)
     n = len(persons)
     T = len(persons[0]["incam_transl"])
@@ -237,7 +247,13 @@ def build_scene(model, persons, K, fps, smoothing="medium", colors=None, track_i
     glbs, pelvis = [], []
     for i, (b, (rots, root)) in enumerate(zip(betas, mot)):
         rw, pw = apply_world(rots, root, Wr, tw)
-        glbs.append(build_person_glb(model, b, rw, pw, colors[i % len(colors)], fps))
+        if hands is not None:
+            import smplx_np as sx
+
+            r52 = np.concatenate([rw[:, :22], finger_rots(*hands[i])], axis=1)
+            glbs.append(sx.build_person_glb(smplx_model, b, r52, pw, colors[i % len(colors)], fps))
+        else:
+            glbs.append(build_person_glb(model, b, rw, pw, colors[i % len(colors)], fps))
         pelvis.append(pw)
     prefixes = [PREFIXES[i] if i < len(PREFIXES) else f"fighter{i}_" for i in range(n)]
     K = np.asarray(K, float)
@@ -269,4 +285,9 @@ def build_scene(model, persons, K, fps, smoothing="medium", colors=None, track_i
         "gravity": {"up_in_camera_cv": up_cv.tolist(), "R_g": G.tolist(), "angle_between_person_estimates_deg": angle},
         "persons": pers,
     }
+    if hands is not None:
+        import smplx_np as sx
+
+        meta["hands"] = {"skeleton": "SMPL-X 22 body + 30 finger joints (jaw / eyes folded into head)", "joint_names": sx.NAMES_52,
+                         "finger_joints": sx.NAMES_52[22:]}
     return glb, meta

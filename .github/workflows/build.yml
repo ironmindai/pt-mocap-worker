@@ -2,7 +2,7 @@ name: build-and-push-lab
 
 on:
   push:
-    branches: [lab-multiperson-dual, sparring-scene]
+    branches: [lab-multiperson-dual, sparring-scene, hands]
   workflow_dispatch:
 
 env:
@@ -38,7 +38,7 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name == 'sparring-scene' && 'scene' || 'dual' }}-${{ github.sha }}
+            ${{ env.IMAGE }}:${{ github.ref_name == 'sparring-scene' && 'scene' || github.ref_name == 'hands' && 'hands' || 'dual' }}-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: |

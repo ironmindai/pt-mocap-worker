@@ -54,5 +54,24 @@ RUN ls -l ${CKPT}/*/* && test $(stat -c %s ${CKPT}/body_models/smplx/SMPLX_NEUTR
     && /usr/bin/ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 \
     && python -c "import pytorch3d, smplx, chumpy, ultralytics, hydra, scipy, runpod; print('imports ok')"
 
-COPY handler.py smpl_bvh.py smpl_glb.py motion.py multiperson.py scene.py /workspace/
+# ---- HaMeR hand-pose regressor (`hands: true`): MIT code (pinned) + ungated weights (HF space, pinned) ----
+# Only the model is used (crops come from the SMPL-X hand joints); detectron2 / ViTPose / mmcv are NOT needed.
+ARG HAMER_COMMIT=3a01849f4148352e9260b69bf28b65d1671a4905
+ARG HAMER_MIRROR=https://huggingface.co/spaces/geopavlakos/HaMeR/resolve/aabc78ee4fd1f1ccf1a55fdd4225bf84df0e680a/_DATA
+ENV HAMER_REPO=/workspace/hamer HAMER_DATA=/workspace/hamer_data PYOPENGL_PLATFORM=egl
+RUN git clone https://github.com/geopavlakos/hamer.git ${HAMER_REPO} \
+    && cd ${HAMER_REPO} && git checkout ${HAMER_COMMIT} && rm -rf .git third-party assets example_data docker \
+    && pip install yacs pyrender \
+    && mkdir -p ${HAMER_DATA}/_DATA/hamer_ckpts/checkpoints ${HAMER_DATA}/_DATA/data/mano \
+    && DL="curl -fL --retry 5 --retry-delay 5 --retry-all-errors -o" \
+    && $DL ${HAMER_DATA}/_DATA/hamer_ckpts/checkpoints/hamer.ckpt ${HAMER_MIRROR}/hamer_ckpts/checkpoints/hamer.ckpt \
+    && $DL ${HAMER_DATA}/_DATA/hamer_ckpts/model_config.yaml      ${HAMER_MIRROR}/hamer_ckpts/model_config.yaml \
+    && $DL ${HAMER_DATA}/_DATA/data/mano_mean_params.npz          ${HAMER_MIRROR}/data/mano_mean_params.npz \
+    && $DL ${HAMER_DATA}/_DATA/data/mano/MANO_RIGHT.pkl           ${SMPL_MIRROR}/4_SMPLhub/MANO/pkl/MANO_RIGHT.pkl \
+    && test $(stat -c %s ${HAMER_DATA}/_DATA/hamer_ckpts/checkpoints/hamer.ckpt) -gt 2000000000 \
+    && test $(stat -c %s ${HAMER_DATA}/_DATA/data/mano/MANO_RIGHT.pkl) -gt 1000000
+COPY hamer_infer.py /workspace/
+RUN cd /workspace && python -c "import hamer_infer; hamer_infer._import_hamer(); import hamer.models; print('hamer import ok')"
+
+COPY handler.py smpl_bvh.py smpl_glb.py motion.py multiperson.py scene.py smplx_np.py hands.py hands_pipeline.py hamer_infer.py /workspace/
 CMD ["python", "-u", "/workspace/handler.py"]
