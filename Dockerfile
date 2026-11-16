@@ -54,5 +54,5 @@ RUN ls -l ${CKPT}/*/* && test $(stat -c %s ${CKPT}/body_models/smplx/SMPLX_NEUTR
     && /usr/bin/ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 \
     && python -c "import pytorch3d, smplx, chumpy, ultralytics, hydra, scipy, runpod; print('imports ok')"
 
-COPY handler.py smpl_bvh.py smpl_glb.py motion.py /workspace/
+COPY handler.py smpl_bvh.py smpl_glb.py motion.py multiperson.py /workspace/
 CMD ["python", "-u", "/workspace/handler.py"]

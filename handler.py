@@ -14,6 +14,17 @@ Input:
                 pose / root translation before export (applies to both BVH and GLB).
   return_smpl   bool, default false. Also return the raw SMPL-X params as base64 npz ("smpl_npz_b64").
 
+Multi-person mode (lab branch; single-person behaviour above is unchanged when none of these is given):
+  list_tracks   bool. Run only the YOLO+ByteTrack pass and return {"tracks": [...], "n_frames", "width", "height"}
+                (every track: id, rank by bbox-area score, frame range, area_score, sampled bboxes).
+  track_ids     list; one entry per person, each an int or a list of ints (ids merged into one person).
+  person_rank   list of ints indexing the area-sorted tracks (alternative to track_ids).
+  bbx_override  list (per person) of per-frame [x1,y1,x2,y2] at 30 fps (all frames), bypasses tracking.
+  -> {"persons": [{rank, track_ids, observed_frames, bbox_xyxy, params_npz_b64, glb_b64, ...}], "tracks", "K_fullimg",
+      "fps": 30, ...}. params_npz keys: incam_{global_orient,body_pose,betas,transl}, global_{...}, K_fullimg,
+      joints24_incam (T,24,3 SMPL joints in the camera frame, via GVHMR's own SMPL-X->SMPL path), bbx_xys, observed.
+  person_colors optional list of "#rrggbb" shorts colours for the per-person (ground-aligned) GLBs.
+
 Output:
   {"bvh_b64", "glb_b64", "gender_used", "smoothing", "fps", "n_frames", "duration_s", "elapsed_s", ...}   or   {"error": "..."}
 """
@@ -174,6 +185,149 @@ def run_gvhmr(video_path, workdir, name, static_cam, f_mm):
     return {k: v.numpy() for k, v in pred["smpl_params_global"].items()}
 
 
+PERSON_COLORS = ["#C0201A", "#1F4FC4", "#1E8E3E", "#C98A00"]  # red, blue, green, amber
+
+
+def _cpu_np(d):
+    return {k: v.detach().cpu().numpy() for k, v in d.items()}
+
+
+def _incam_joints24(pred, st):
+    """SMPL(24) joints in the camera frame for one person, GVHMR's own recipe (render_incam): SMPL-X ->
+    smplx2smpl vertices -> SMPL J-regressor. Returns (T,24,3) float32 or None on failure."""
+    try:
+        import torch
+        from hmr4d.utils.net_utils import to_cuda
+        from hmr4d.utils.smplx_utils import make_smplx
+
+        if "smplx" not in st:
+            st["smplx"] = make_smplx("supermotion").cuda()
+            st["smplx2smpl"] = torch.load("hmr4d/utils/body_model/smplx2smpl_sparse.pt").cuda()
+            st["J_reg"] = torch.load("hmr4d/utils/body_model/smpl_neutral_J_regressor.pt").cuda()
+        with torch.no_grad():
+            o = st["smplx"](**to_cuda(pred["smpl_params_incam"]))
+            verts = torch.stack([torch.matmul(st["smplx2smpl"], v) for v in o.vertices])
+            j = torch.einsum("jv,tvi->tji", st["J_reg"], verts)
+        return j.cpu().numpy().astype(np.float32)
+    except Exception as e:  # noqa: BLE001
+        print(f"[joints24_incam] failed: {type(e).__name__}: {e}", flush=True)
+        return None
+
+
+def handle_multi(inp, job, work, norm, name, t0):
+    """list_tracks / per-person GVHMR. `norm` is the normalized 30 fps video."""
+    import multiperson as mpx
+
+    os.chdir(GVHMR_DIR)
+    static_cam = bool(inp.get("static_cam", False))
+    f_mm = int(inp["f_mm"]) if inp.get("f_mm") is not None else None
+    smoothing = str(inp.get("smoothing", "medium")).lower()
+    if smoothing not in SMOOTHING:
+        raise ValueError(f"smoothing must be one of {SMOOTHING}")
+    gender = str(inp.get("gender", "male")).lower()
+    if gender not in GENDERS:
+        raise ValueError(f"gender must be one of {GENDERS}")
+    colors = inp.get("person_colors") or PERSON_COLORS
+    from hmr4d.utils.video_io_utils import get_video_lwh
+
+    n_frames, width, height = get_video_lwh(norm)
+    if n_frames < 8:
+        raise ValueError(f"video too short ({n_frames} frames at {MODEL_FPS} fps)")
+
+    t_track = time.time()
+    history, summaries = None, []
+    if inp.get("bbx_override") is None:
+        import torch
+        from hmr4d.utils.preproc import Tracker
+
+        with torch.no_grad():
+            tracker = Tracker()
+            history = tracker.track(norm)
+            del tracker
+        torch.cuda.empty_cache()
+        summaries = mpx.summarize_tracks(history, width, height)
+    track_s = round(time.time() - t_track, 1)
+    out = {"tracks": summaries, "n_frames": n_frames, "width": width, "height": height, "fps": MODEL_FPS,
+           "tracking_s": track_s}
+    if inp.get("list_tracks") and inp.get("track_ids") is None and inp.get("person_rank") is None \
+            and inp.get("bbx_override") is None:
+        out["elapsed_s"] = round(time.time() - t0, 1)
+        return out
+
+    # ---- one bbox sequence per requested person ----
+    if inp.get("bbx_override") is not None:
+        persons = []
+        for i, seq in enumerate(inp["bbx_override"]):
+            seq = np.asarray(seq, dtype=np.float64)
+            if seq.shape != (n_frames, 4):
+                raise ValueError(f"bbx_override[{i}] must have shape ({n_frames}, 4), got {seq.shape}")
+            persons.append(([-1 - i], seq, np.ones(n_frames, dtype=bool)))
+    else:
+        groups = mpx.select_tracks(summaries, inp.get("track_ids"), inp.get("person_rank"))
+        persons = [(g, *mpx.build_person_bbx(history, g, n_frames)) for g in groups]
+
+    st = _load()
+    demo, torch, model = st["demo"], st["torch"], st["model"]
+    from hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy
+
+    from motion import smooth_motion
+    from smpl_glb import smpl_to_glb
+
+    results, slam_src = [], None
+    for i, (ids, bbx, observed) in enumerate(persons):
+        t_p = time.time()
+        try:
+            runpod.serverless.progress_update(job, f"person {i + 1}/{len(persons)}")
+        except Exception:
+            pass
+        cfg = _compose(st["compose"], st["init"], f"{name}_p{i}", work, static_cam, f_mm)
+        os.makedirs(cfg.preprocess_dir, exist_ok=True)
+        shutil.copy(norm, cfg.video_path)
+        bbx_t = torch.from_numpy(bbx).float()
+        torch.save({"bbx_xyxy": bbx_t, "bbx_xys": get_bbx_xys_from_xyxy(bbx_t, base_enlarge=1.2).float()},
+                   cfg.paths.bbx)  # run_preprocess then skips tracking and reuses our bbox
+        if slam_src and os.path.exists(slam_src):
+            shutil.copy(slam_src, cfg.paths.slam)
+        with torch.no_grad():
+            demo.run_preprocess(cfg)
+            data = demo.load_data_dict(cfg)
+            pred = model.predict(data, static_cam=cfg.static_cam)
+        pred = demo.detach_to_cpu(pred)
+        if not static_cam and os.path.exists(cfg.paths.slam):
+            slam_src = cfg.paths.slam
+        inc, glo = _cpu_np(pred["smpl_params_incam"]), _cpu_np(pred["smpl_params_global"])
+        K = pred["K_fullimg"][0].numpy()
+        j24 = _incam_joints24(pred, st)
+        arrs = {"K_fullimg": K, "bbx_xyxy": bbx, "bbx_xys": torch.load(cfg.paths.bbx)["bbx_xys"].numpy(),
+                "observed": observed, "fps": np.float64(MODEL_FPS)}
+        arrs.update({f"incam_{k}": v for k, v in inc.items()})
+        arrs.update({f"global_{k}": v for k, v in glo.items()})
+        if j24 is not None:
+            arrs["joints24_incam"] = j24
+        buf = io.BytesIO()
+        np.savez_compressed(buf, **arrs)
+        res = {"rank": i, "track_ids": [int(x) for x in ids], "observed_frames": int(observed.sum()),
+               "bbox_xyxy": np.round(bbx, 1).tolist(), "color": colors[i % len(colors)],
+               "params_npz_b64": base64.b64encode(buf.getvalue()).decode()}
+        try:  # ground-aligned stand-alone preview GLB (own origin / heading), person-coloured shorts
+            go, bp, tr = smooth_motion(glo["global_orient"], glo["body_pose"], glo["transl"], smoothing)
+            model_smpl, used = get_smpl_model(gender)
+            res["glb_b64"] = base64.b64encode(smpl_to_glb(
+                model_smpl, go, bp, tr, glo["betas"], MODEL_FPS, used, shorts_color=colors[i % len(colors)],
+                top=False)).decode()
+            res["gender_used"] = used
+        except Exception as e:  # noqa: BLE001
+            res["glb_error"] = f"{type(e).__name__}: {e}"[-1500:]
+        res["person_s"] = round(time.time() - t_p, 1)
+        results.append(res)
+        torch.cuda.empty_cache()
+    out["K_fullimg"] = K.tolist()
+    out["persons"] = results
+    out["static_cam"] = static_cam
+    out["elapsed_s"] = round(time.time() - t0, 1)
+    return out
+
+
 def handler(job):
     t0 = time.time()
     inp = job.get("input") or {}
@@ -197,6 +351,9 @@ def handler(job):
         fetch_video(inp, raw)
         normalize_video(raw, norm)
         os.remove(raw)
+        if (inp.get("list_tracks") or inp.get("track_ids") is not None or inp.get("person_rank") is not None
+                or inp.get("bbx_override") is not None):
+            return handle_multi(inp, job, work, norm, name, t0)
         try:
             runpod.serverless.progress_update(job, "running GVHMR")
         except Exception:

@@ -40,13 +40,14 @@ SHORTS_HEM_T = 0.6  # shorts end 60% of the way from hip joint to knee joint
 WAISTBAND_M = 0.04  # waistband height below the top edge of the shorts
 
 
-def clothing_colors(verts, faces, joints, weights, gender="neutral", feather=1):
+def clothing_colors(verts, faces, joints, weights, gender="neutral", feather=1, shorts_color=None, top=None):
     """Painted-on clothing as per-vertex linear RGBA, derived from rest pose + skinning weights.
 
     Shorts (all genders): vertices whose dominant joint is pelvis / hips, above 60% of the hip->knee drop, with a
     gold waistband strip at the top edge. Sports top (female and neutral): vertices dominated by spine joints
     above the lower-chest cutoff (arms / shoulders / neck stay skin). Rest is skin.
     Returns (colors (V,4) float32, region labels (V,) uint8: 0 skin, 1 shorts, 2 waistband, 3 top).
+    shorts_color: optional "#rrggbb" overriding the shorts colour. top: None = by gender (legacy), False = never paint a top.
     """
     verts, joints, weights = np.asarray(verts), np.asarray(joints), np.asarray(weights)
     V = len(verts)
@@ -64,11 +65,11 @@ def clothing_colors(verts, faces, joints, weights, gender="neutral", feather=1):
     if shorts.any():
         label[shorts & (y >= y[shorts].max() - WAISTBAND_M)] = 2
 
-    if gender in ("female", "neutral"):
+    if (gender in ("female", "neutral")) if top is None else bool(top):
         cut = joints[3, 1] + 0.6 * (joints[6, 1] - joints[3, 1])
         label[np.isin(dom, TOP_JOINTS) & (y >= cut)] = 3
 
-    palette = np.stack([SKIN, SHORTS, WAISTBAND, TOP])
+    palette = np.stack([SKIN, _srgb_to_linear(shorts_color) if shorts_color else SHORTS, WAISTBAND, TOP])
     rgb = palette[label]
     for _ in range(feather):
         rgb = _feather(rgb, faces)
@@ -240,7 +241,8 @@ def build_glb(verts, faces, joints, parents, weights, quats, root_pos, fps, name
             + struct.pack("<I4s", len(bb), b"BIN\0") + bb)
 
 
-def smpl_to_glb(model, global_orient, body_pose, transl, betas, fps, gender="neutral", clothing=True):
+def smpl_to_glb(model, global_orient, body_pose, transl, betas, fps, gender="neutral", clothing=True,
+                rebase_motion=True, shorts_color=None, top=None):
     """SMPL(-X body) pose sequence -> GLB bytes. `model` comes from load_smpl_pkl.
 
     global_orient (T,3), body_pose (T,63) axis-angle, transl (T,3) meters, betas (10,) or (T,10).
@@ -256,14 +258,16 @@ def smpl_to_glb(model, global_orient, body_pose, transl, betas, fps, gender="neu
     verts = model["v_template"] + np.einsum("vcd,d->vc", model["shapedirs"][:, :, : len(betas)], betas)
     joints = model["J_regressor"] @ verts
     root = joints[0][None] + np.asarray(transl, dtype=np.float64).reshape(T, 3)
-    rots, root = rebase(joints, rots, root, PARENTS_24)
+    if rebase_motion:  # False keeps the input frame (e.g. the camera frame) untouched
+        rots, root = rebase(joints, rots, root, PARENTS_24)
     q = R.from_matrix(rots.reshape(-1, 3, 3)).as_quat().reshape(T, 24, 4)
     for t in range(1, T):  # sign continuity so slerp takes the short way
         flip = (q[t] * q[t - 1]).sum(-1) < 0
         q[t][flip] = -q[t][flip]
     colors = None
     if clothing:
-        colors, _ = clothing_colors(verts, model["faces"], joints, model["weights"], gender)
+        colors, _ = clothing_colors(verts, model["faces"], joints, model["weights"], gender,
+                                    shorts_color=shorts_color, top=top)
         if colors is not None and not clothing_is_visible(colors):
             colors = np.concatenate([np.tile(SKIN, (len(verts), 1)), np.ones((len(verts), 1))], axis=1)
     return build_glb(verts, model["faces"], joints, PARENTS_24, model["weights"], q, root, fps, JOINT_NAMES_24, colors)

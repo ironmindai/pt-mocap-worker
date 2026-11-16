@@ -1,12 +1,12 @@
-name: build-and-push
+name: build-and-push-lab
 
 on:
   push:
-    branches: [main]
+    branches: [lab-multiperson-dual]
   workflow_dispatch:
 
 env:
-  IMAGE: ghcr.io/ironmindai/pt-mocap-worker
+  IMAGE: ghcr.io/ironmindai/pt-mocap-lab
 
 jobs:
   build:
@@ -38,9 +38,10 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:dual-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
+          cache-from: |
+            type=gha
+            type=gha,scope=lab-dual
+          cache-to: type=gha,mode=min,scope=lab-dual
