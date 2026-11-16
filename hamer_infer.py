@@ -7,7 +7,7 @@ Code: github.com/geopavlakos/hamer (MIT), put on sys.path via $HAMER_REPO. Only 
 """
 import os
 import sys
-import types
+from unittest.mock import MagicMock
 
 import numpy as np
 
@@ -16,20 +16,20 @@ HAMER_DATA = os.environ.get("HAMER_DATA", "/workspace/hamer_data")
 
 
 def _import_hamer():
-    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    """Import the HaMeR package without its rendering stack: pyrender (needs EGL / a GL context) is replaced by an empty
+    module because only the regression model is used here, never the renderers."""
     if HAMER_REPO not in sys.path:
         sys.path.insert(0, HAMER_REPO)
+    sys.modules["pyrender"] = MagicMock()
     try:
         import hamer.models  # noqa: F401
-    except Exception as e:  # noqa: BLE001  (renderer deps are optional: we never render)
-        if "pyrender" in str(e) or "OpenGL" in str(e) or "trimesh" in str(e):
-            for m in [k for k in sys.modules if k.startswith("hamer")]:
-                del sys.modules[m]
-            for name in ("pyrender", "trimesh", "OpenGL", "OpenGL.GL"):
-                sys.modules[name] = types.ModuleType(name)
-            import hamer.models  # noqa: F401
-        else:
+    except ImportError as e:
+        if "trimesh" not in str(e):
             raise
+        for m in [k for k in sys.modules if k.startswith("hamer")]:
+            del sys.modules[m]
+        sys.modules["trimesh"] = MagicMock()
+        import hamer.models  # noqa: F401
 
 
 class HandEstimator:
