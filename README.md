@@ -119,6 +119,31 @@ pelvis_world_m (T x 3)}]`. Merge maths lives in `scene.py` (tests: `tests/test_s
   `betas (T,10)` (axis-angle, SMPL-X convention, meters) as a compressed npz. Note these are raw GVHMR
   values, before the BVH re-basing (heading/ground).
 
+## Hands (`hands: true`, branch `hands`, image `ghcr.io/ironmindai/pt-mocap-lab:hands-<sha>`)
+
+Adds per-finger pose estimation (HaMeR, MANO ViT-H) on top of GVHMR. Default `hands: false` = behaviour identical to before.
+
+Inputs (all modes: single-person `glb_b64`, multi-person per-person `glb_b64`, sparring `scene_glb_b64`):
+- `hands` bool - estimate fingers; the GLB mesh becomes **SMPL-X** (neutral; `gender` only affects the painted clothing).
+- `return_hands` bool - also return `hands_npz_b64`.
+
+How it works: each fighter's camera-frame SMPL-X joints are projected with K to get a hand crop per hand (no detector); left hands
+are mirrored; HaMeR runs in two passes (second pass re-centres on its own 2D keypoints); per-frame confidence = visibility x
+sharpness (motion blur) x agreement of HaMeR's wrist with the body wrist; poses are clamped to the MANO training-pose range,
+low-confidence frames are bridged (<= 0.5 s) or held and faded to the relaxed SMPL-X `hands_mean` pose, then quaternion
+Savitzky-Golay (window 5, sign-continuous). Body motion, pelvis track, gravity and floor are unchanged (same root, same body rotations,
+floor from the SMPL feet). Wrist orientation always comes from the body model.
+
+GLB skeleton (per figure, prefixed `fighter0_` / `fighter1_` in scenes): 52 nodes = the 22 SMPL body nodes (`Pelvis`, `L_Hip`, ..., `L_Wrist`,
+`R_Wrist`; no `L_Hand`/`R_Hand`) + 30 finger nodes `{L,R}_{Index,Middle,Pinky,Ring,Thumb}{1,2,3}` (first joint parented to the wrist),
+plus `SMPL_mesh`. One rotation track per node, ONE clip. Rotations are absolute local rotations from the SMPL-X template (flat hand =
+identity). Extra response keys: `hands` ({hand_crops, hamer_s, mean_weight}), `hands_error` (then the plain SMPL output is returned).
+
+`hands_npz_b64` keys (np.savez): per person `p{i}_left_hand_pose`, `p{i}_right_hand_pose` (T,15,3) SMPL-X axis-angle (fused; MANO joint order
+index, middle, pinky, ring, thumb x 3; left = right-equivalent with y,z negated), `p{i}_weight` (T,2) final blend weight [L,R]
+(1 = estimate, 0 = relaxed neutral), `p{i}_conf_raw`, `p{i}_raw_left`, `p{i}_raw_right` (unfused), `p{i}_kp_img` (T,2,21,2) HaMeR keypoints in
+image px, `p{i}_agree_deg`; `neutral_hand_left/right`, `fps`. For Mixamo retargeting use the (T,15,3) tracks + `weight`.
+
 ## Build
 
 GitHub Actions (`.github/workflows/build.yml`) builds on every push to `main` and pushes `latest` + `<git sha>`
