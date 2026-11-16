@@ -251,8 +251,16 @@ def handle_multi(inp, job, work, norm, name, t0):
            "tracking_s": track_s}
     if inp.get("list_tracks") and inp.get("track_ids") is None and inp.get("person_rank") is None \
             and inp.get("bbx_override") is None:
+        out["suggested"] = [s["id"] for s in summaries[:2]]
+        out["sample_every"] = 3
         out["elapsed_s"] = round(time.time() - t0, 1)
         return out
+
+    scene = bool(inp.get("scene"))
+    if scene and inp.get("track_ids") is None and inp.get("person_rank") is None and inp.get("bbx_override") is None:
+        if len(summaries) < 2:
+            raise ValueError(f"scene needs two people but only {len(summaries)} track(s) were found; pass track_ids / bbx_override")
+        inp = dict(inp, person_rank=[0, 1])  # auto: the two largest tracks
 
     # ---- one bbox sequence per requested person ----
     if inp.get("bbx_override") is not None:
@@ -273,7 +281,7 @@ def handle_multi(inp, job, work, norm, name, t0):
     from motion import smooth_motion
     from smpl_glb import smpl_to_glb
 
-    results, slam_src = [], None
+    results, slam_src, scene_people = [], None, []
     for i, (ids, bbx, observed) in enumerate(persons):
         t_p = time.time()
         try:
@@ -306,22 +314,48 @@ def handle_multi(inp, job, work, norm, name, t0):
             arrs["joints24_incam"] = j24
         buf = io.BytesIO()
         np.savez_compressed(buf, **arrs)
+        if scene:
+            if j24 is None:
+                raise RuntimeError("scene: joints24_incam could not be computed")
+            scene_people.append({**{f"incam_{k}": v for k, v in inc.items()}, **{f"global_{k}": v for k, v in glo.items()},
+                                 "joints24_incam": j24})
         res = {"rank": i, "track_ids": [int(x) for x in ids], "observed_frames": int(observed.sum()),
                "bbox_xyxy": np.round(bbx, 1).tolist(), "color": colors[i % len(colors)],
                "params_npz_b64": base64.b64encode(buf.getvalue()).decode()}
-        try:  # ground-aligned stand-alone preview GLB (own origin / heading), person-coloured shorts
+        try:  # ground-aligned stand-alone preview GLB
+            if scene and not inp.get("return_persons"):
+                raise StopIteration (own origin / heading), person-coloured shorts
             go, bp, tr = smooth_motion(glo["global_orient"], glo["body_pose"], glo["transl"], smoothing)
             model_smpl, used = get_smpl_model(gender)
             res["glb_b64"] = base64.b64encode(smpl_to_glb(
                 model_smpl, go, bp, tr, glo["betas"], MODEL_FPS, used, shorts_color=colors[i % len(colors)],
                 top=False)).decode()
             res["gender_used"] = used
+        except StopIteration:
+            pass
         except Exception as e:  # noqa: BLE001
             res["glb_error"] = f"{type(e).__name__}: {e}"[-1500:]
         res["person_s"] = round(time.time() - t_p, 1)
         results.append(res)
         torch.cuda.empty_cache()
     out["K_fullimg"] = K.tolist()
+    if scene:
+        import scene as scn
+
+        if len(persons) < 2:
+            raise ValueError("scene needs two persons")
+        t_s = time.time()
+        model_smpl, used = get_smpl_model(str(inp.get("scene_gender", "neutral")).lower())
+        glb, meta = scn.build_scene(
+            model_smpl, scene_people, K, MODEL_FPS, smoothing, colors=inp.get("person_colors") or scn.DEFAULT_COLORS,
+            track_ids=[p[0] for p in persons], observed=[p[2] for p in persons], bboxes=[p[1] for p in persons])
+        meta.update(width=width, height=height, gender_used=used, static_cam=static_cam, scene_s=round(time.time() - t_s, 1))
+        out["scene_glb_b64"] = base64.b64encode(glb).decode()
+        out["scene_meta"] = meta
+        if not inp.get("return_persons"):  # per-person payloads (params npz + stand-alone GLB) only on request
+            for r in results:
+                for k in ("params_npz_b64", "glb_b64", "bbox_xyxy"):
+                    r.pop(k, None)
     out["persons"] = results
     out["static_cam"] = static_cam
     out["elapsed_s"] = round(time.time() - t0, 1)
@@ -351,7 +385,7 @@ def handler(job):
         fetch_video(inp, raw)
         normalize_video(raw, norm)
         os.remove(raw)
-        if (inp.get("list_tracks") or inp.get("track_ids") is not None or inp.get("person_rank") is not None
+        if (inp.get("list_tracks") or inp.get("scene") or inp.get("track_ids") is not None or inp.get("person_rank") is not None
                 or inp.get("bbx_override") is not None):
             return handle_multi(inp, job, work, norm, name, t0)
         try:

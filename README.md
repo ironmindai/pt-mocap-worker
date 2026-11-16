@@ -78,6 +78,32 @@ Camera motion: with `static_cam` false, GVHMR's SimpleVO (SIFT + pycolmap) estim
 Limits (env overridable): `MAX_VIDEO_BYTES` 500 MB, `MAX_SECONDS` 120 (longer videos are truncated).
 The video is re-encoded with ffmpeg to constant 30 fps first, so variable/60 fps sources are handled.
 
+## Sparring scene mode (`scene: true`, branch `sparring-scene`, image `ghcr.io/ironmindai/pt-mocap-lab:scene-<sha>`)
+
+Returns one ready-to-use GLB with two animated fighters; no SMPL weights or merge scripts needed on the app side.
+
+Input (all the usual ones plus): `scene: true`; optional `track_ids` / `person_rank` / `bbx_override` (default: the two
+largest tracks, `person_rank [0,1]`; error if fewer than two); `person_colors` (default `["#8C1D18", "#1F4FC4"]`, red / blue
+shorts); `smoothing`; `static_cam`; `scene_gender` (default `neutral`); `return_persons: true` to also get the per-person
+npz / stand-alone GLBs (omitted by default in scene mode). `list_tracks` additionally returns `suggested` (ids of the two
+largest tracks) and `sample_every` (3; `tracks[].bboxes` = `[frame, x1, y1, x2, y2]` every 3rd frame, in video pixels, 30 fps timeline).
+
+Output: `scene_glb_b64`, `scene_meta`, plus `tracks`, `n_frames`, `width`, `height`, `K_fullimg`, `persons` (summary only), `elapsed_s`.
+
+GLB: glTF 2.0, Y up, metres, floor at y = 0 (10th percentile of the lowest foot vertex over both fighters, pooled), 30 fps.
+Two skinned SMPL meshes, nodes prefixed `fighter0_` / `fighter1_` (`fighter0_Pelvis` ... `fighter0_R_Hand`, `fighter0_SMPL_mesh`;
+skins / meshes / materials prefixed too), 25 nodes per fighter (24 joints + mesh), root nodes of the scene = each fighter's pelvis
+and mesh node. ONE animation clip named `scene` holding all 50 channels (per fighter: 24 rotation tracks + pelvis translation),
+so `mixer.clipAction(gltf.animations[0]).play()` animates both. Gravity: world-up in the camera frame = mean of both persons'
+GVHMR gravity-view estimates, minimal rotation to +Y (no extra yaw: the world frame is the camera heading, camera looks along +Z,
++X is the viewer's left). Camera is at `(0, cam_height_m, 0)`; `scene_meta.camera.R_world_from_three_cam` is the rotation matrix for a
+three.js camera that reproduces the video view (fov = `fov_y_deg`, aspect = width/height). Scale is monocular (GVHMR depth),
+`cam_height_m` is derived, not measured. Frame a free viewer on the midpoint of both `pelvis_world_m` tracks.
+
+`scene_meta`: `fps, n_frames, duration_s, units, up_axis, clip, cam_height_m, floor_y, K, fov_y_deg, width, height, camera, gravity,
+persons[{index, node_prefix, pelvis_node, mesh_node, color, track_ids, observed_frames, foot_y_p10_m, bbox_xyxy{first,mean,last},
+pelvis_world_m (T x 3)}]`. Merge maths lives in `scene.py` (tests: `tests/test_scene.py`).
+
 ### BVH details
 
 - Skeleton: 22 SMPL joints (Pelvis, hips, knees, ankles, feet, spine1-3, neck, collars, head, shoulders, elbows, wrists).
