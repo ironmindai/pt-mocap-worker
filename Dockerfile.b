@@ -47,6 +47,8 @@ RUN ls -l ${H3R_DIR}/src ${H3R_DIR}/src/models/smplx \
     && /usr/bin/ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 \
     && cd ${H3R_DIR} && python -c "import sys; sys.path[:0]=['.','src']; import demo; from src.dust3r.model import ARCroco3DStereo; from src.dust3r.utils import SMPL_Layer; SMPL_Layer(type='smplx', gender='neutral', num_betas=10, kid=False, person_center='head'); import roma, smplx, runpod, gsplat; print('imports ok')"
 
-COPY handler.py handler_b.py human3r_infer.py smplx_glb.py smpl_glb.py motion.py /workspace/
+COPY handler.py handler_b.py human3r_infer.py smplx_glb.py smpl_glb.py smpl_bvh.py motion.py /workspace/
 ENV PYTHONPATH=/workspace
+# import-check the whole handler (catches missing modules at build time, not at paid runtime)
+RUN cd /workspace && python -c "import handler_b, smplx_glb; print('handler imports ok')"
 CMD ["python", "-u", "/workspace/handler_b.py"]
