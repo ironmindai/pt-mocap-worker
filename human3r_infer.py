@@ -53,6 +53,7 @@ def run_inference(model, img_paths, device, size=512, reset_interval=100, use_tt
 
 
 def postprocess(outputs, device="cpu", min_frames=8):
+    device = "cpu"  # tiny workload; CPU keeps it independent of GPU state/memory
     """Raw outputs -> numpy dict (see module doc). Mirrors demo.prepare_output without the viewer/rendering."""
     import roma
     import torch
@@ -78,17 +79,18 @@ def postprocess(outputs, device="cpu", min_frames=8):
         poses = list(pr.unsqueeze(1).unbind(0))
     c2w = torch.cat(poses, 0).numpy()  # (T,4,4)
 
-    pts_self = torch.cat([p["pts3d_in_self_view"] for p in pred], 0)  # (T,H,W,3)
+    pts_self = torch.cat([p["pts3d_in_self_view"].detach().cpu() for p in pred], 0)  # (T,H,W,3)
     T, H, W, _ = pts_self.shape
     pp = torch.tensor([W // 2, H // 2], device=pts_self.device).float().repeat(T, 1)
     focal = estimate_focal_knowing_depth(pts_self, pp, focal_mode="weiszfeld").detach().cpu().numpy()  # (T,)
     net_hw = (int(H), int(W))
 
-    shape_l = [p.get("smpl_shape", torch.empty(1, 0, 10))[0] for p in pred]
-    rot_l = [roma.rotmat_to_rotvec(p.get("smpl_rotmat", torch.empty(1, 0, 53, 3, 3))[0]) for p in pred]
-    transl_l = [p.get("smpl_transl", torch.empty(1, 0, 3))[0] for p in pred]
-    expr_l = [p.get("smpl_expression", [None])[0] for p in pred]
-    id_l = [p.get("smpl_id", torch.empty(1, 0))[0] for p in pred]
+    _c = lambda x: x.detach().cpu() if torch.is_tensor(x) else x  # noqa: E731  (outputs may live on the GPU)
+    shape_l = [_c(p.get("smpl_shape", torch.empty(1, 0, 10))[0]) for p in pred]
+    rot_l = [roma.rotmat_to_rotvec(_c(p.get("smpl_rotmat", torch.empty(1, 0, 53, 3, 3))[0])) for p in pred]
+    transl_l = [_c(p.get("smpl_transl", torch.empty(1, 0, 3))[0]) for p in pred]
+    expr_l = [_c(p.get("smpl_expression", [None])[0]) for p in pred]
+    id_l = [_c(p.get("smpl_id", torch.empty(1, 0))[0]) for p in pred]
     nb = next((s.shape[-1] for s in shape_l if s.shape[0] > 0), 10)
 
     layer = SMPL_Layer(type="smplx", gender="neutral", num_betas=nb, kid=False, person_center="head").to(device)

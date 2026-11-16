@@ -33,3 +33,14 @@ for a, b in rep:
     s = s.replace(a, b)
 open(path, "w").write(s)
 print("patched", path)
+
+# Second patch: utils/device.py to_gpu() copies small temp clones with non_blocking=True. A pending async copy from a
+# freed pageable temp can race (observed: img_mask arrived all-False on one GPU run, identical run succeeded before).
+dpath = sys.argv[1].rstrip("/") + "/src/dust3r/utils/device.py"
+d = open(dpath).read()
+a = "view[name] = [x.clone().to(device, non_blocking=True) for x in _view[name]]"
+b = "view[name] = _view[name].clone().to(device, non_blocking=True)"
+assert d.count(a) == 1 and d.count(b) == 1
+d = d.replace(a, a.replace("non_blocking=True", "non_blocking=False")).replace(b, b.replace("non_blocking=True", "non_blocking=False"))
+open(dpath, "w").write(d)
+print("patched", dpath)

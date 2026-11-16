@@ -132,8 +132,18 @@ def handler(job):
         if device == "cuda":
             torch.cuda.reset_peak_memory_stats()
         t1 = time.time()
-        outputs, _ = H.run_inference(_state["model"], paths, device, size=size, reset_interval=reset_interval,
-                                     use_ttt3r=True)
+        for attempt in (1, 2):  # one retry: a cold start is the expensive part, a flaky forward pass is not
+            try:
+                outputs, _ = H.run_inference(_state["model"], paths, device, size=size, reset_interval=reset_interval,
+                                             use_ttt3r=True)
+                break
+            except Exception as e:  # noqa: BLE001
+                print(f"[h3r] inference attempt {attempt} failed: {type(e).__name__}: {e}\n{traceback.format_exc()}", flush=True)
+                timing[f"attempt{attempt}_error"] = f"{type(e).__name__}: {e}"[:300]
+                if attempt == 2:
+                    raise
+                if device == "cuda":
+                    torch.cuda.empty_cache()
         if device == "cuda":
             torch.cuda.synchronize()
         timing["infer_s"] = round(time.time() - t1, 1)
