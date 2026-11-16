@@ -1,12 +1,12 @@
-name: build-and-push-lab
+name: build-and-push-lab-b
 
 on:
   push:
-    branches: [lab-multiperson-dual]
+    branches: [lab-multiperson-b]
   workflow_dispatch:
 
 env:
-  IMAGE: ghcr.io/ironmindai/pt-mocap-lab
+  IMAGE: ghcr.io/ironmindai/pt-mocap-lab-b
 
 jobs:
   build:
@@ -36,12 +36,12 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.b
           push: true
           tags: |
-            ${{ env.IMAGE }}:dual-${{ github.sha }}
+            ${{ env.IMAGE }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: |
-            type=gha
-            type=gha,scope=lab-dual
-          cache-to: type=gha,mode=min,scope=lab-dual
+            type=gha,scope=lab-b
+          cache-to: type=gha,mode=min,scope=lab-b
