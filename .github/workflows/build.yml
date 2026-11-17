@@ -38,7 +38,7 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name == 'sparring-scene' && 'scene' || github.ref_name == 'hands' && 'hands' || 'dual' }}-${{ github.sha }}
+            ${{ env.IMAGE }}:${{ github.ref_name == 'sparring-scene' && 'scene' || (github.ref_name == 'hands' || github.ref_name == 'hands-fist') && 'hands' || 'dual' }}-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: |
