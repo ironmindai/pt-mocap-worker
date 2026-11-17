@@ -307,3 +307,18 @@ def test_fist_geometry_real_smplx_both_hands_mirror_and_closed():
     flat_r = sx.posed(m, np.zeros(10), sx.rots_from_params(np.zeros((1, 3)), np.zeros((1, 63))), root, vert_idx=np.arange(1))[1][0]
     flat_tips = np.linalg.norm((flat_r[sx.R_FINGERS] - flat_r[sx.R_WRIST])[[2, 5, 8, 11]], axis=1)
     assert (tips < 0.75 * flat_tips).all()
+
+
+def test_handler_compute_fist_glue_both_key_styles(monkeypatch):
+    import types
+
+    monkeypatch.setitem(sys.modules, "runpod", types.ModuleType("runpod"))
+    import handler as hd
+
+    for key in ("global_orient", "incam_global_orient"):        # multi path passes global params, single path incam params
+        res, info = hd.compute_fist([{key: np.zeros((9, 3))}, {key: np.zeros((9, 3))}])
+        assert info == {"mode": "fist"} and len(res) == 2
+        assert res[0]["left_aa"].shape == res[0]["right_aa"].shape == (9, 15, 3) and res[0]["weight"].shape == (9, 2)
+    with pytest.raises(ValueError):
+        hd.H_parse("open")
+    assert hd.H_parse("fist") == "fist" and hd.H_parse(False) is None

@@ -142,12 +142,12 @@ def _hands_models():
 
 def compute_fist(people):
     """hands="fist": constant closed fist on both hands, every frame, no HaMeR. people: list of dicts with incam_global_orient
-    (T,3). Same result shape as compute_hands (left_aa/right_aa (T,15,3) SMPL-X convention, weight (T,2) = 1)."""
+    or global_orient (T,3). Same result shape as compute_hands (left_aa/right_aa (T,15,3) SMPL-X convention, weight (T,2) = 1)."""
     import hands as H
 
     res = []
     for d in people:
-        T = len(d["incam_global_orient"])
+        T = len(d["global_orient"] if "global_orient" in d else d["incam_global_orient"])
         left, right = H.fist_pose(T)
         res.append({"left_aa": left, "right_aa": right, "weight": np.ones((T, 2))})
     return res, {"mode": "fist"}
