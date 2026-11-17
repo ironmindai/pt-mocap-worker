@@ -63,6 +63,7 @@ SMOOTHING = ("off", "light", "medium", "strong")
 FFMPEG = os.environ.get("FFMPEG_BIN", "/usr/bin/ffmpeg")
 
 _state = {}
+_aux = {}  # lazy extras that must not make `_load` think GVHMR is initialised (`if _state:`)
 
 
 def _load():
@@ -120,11 +121,11 @@ def H_parse(value):
 
 def _smplx_model():
     """Lazy numpy SMPL-X (no HaMeR); used by both hand modes."""
-    if "smplx" not in _state:
+    if "smplx_np" not in _aux:
         import smplx_np as sx
 
-        _state["smplx"] = sx.load_smplx_npz(SMPLX_NPZ)
-    return _state["smplx"]
+        _aux["smplx_np"] = sx.load_smplx_npz(SMPLX_NPZ)
+    return _aux["smplx_np"]
 
 
 def _hands_models():

@@ -322,3 +322,28 @@ def test_handler_compute_fist_glue_both_key_styles(monkeypatch):
     with pytest.raises(ValueError):
         hd.H_parse("open")
     assert hd.H_parse("fist") == "fist" and hd.H_parse(False) is None
+
+
+@real
+def test_handler_fist_npz_and_glb_with_real_smplx(monkeypatch):
+    """Glue as the worker runs it, incl. a pre-existing GVHMR `_state["smplx"]` (a different object) that must not collide."""
+    import base64
+    import io
+    import types
+
+    monkeypatch.setitem(sys.modules, "runpod", types.ModuleType("runpod"))
+    import handler as hd
+
+    monkeypatch.setattr(hd, "SMPLX_NPZ", SMPLX_NPZ)
+    monkeypatch.setitem(hd._state, "smplx", object())
+    monkeypatch.delitem(hd._aux, "smplx_np", raising=False)
+    T = 5
+    res, info = hd.compute_fist([{"global_orient": np.zeros((T, 3))}])
+    z = np.load(io.BytesIO(base64.b64decode(hd.hands_npz(res, 30.0))))
+    assert z["p0_left_hand_pose"].shape == (T, 15, 3) and np.allclose(z["p0_right_hand_pose"], H.FIST_RIGHT)
+    assert np.allclose(z["p0_weight"], 1)
+    mdl = hd._smplx_model()
+    glb = sx.person_glb_ground(mdl, np.zeros(10), np.zeros((T, 3)), np.zeros((T, 63)), np.zeros((T, 3)), res[0]["left_aa"],
+                               res[0]["right_aa"], 30, color="#8C1D18", top=None, gender="male")
+    assert len(glb) > 1000
+    assert "smplx_np" not in hd._state                              # GVHMR init guard (`if _state:`) untouched
