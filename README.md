@@ -148,6 +148,11 @@ index, middle, pinky, ring, thumb x 3; left = right-equivalent with y,z negated)
 (1 = estimate, 0 = relaxed neutral), `p{i}_conf_raw`, `p{i}_raw_left`, `p{i}_raw_right` (unfused), `p{i}_kp_img` (T,2,21,2) HaMeR keypoints in
 image px, `p{i}_agree_deg`; `neutral_hand_left/right`, `fps`. For Mixamo retargeting use the (T,15,3) tracks + `weight`.
 
+Fist mode image: `ghcr.io/ironmindai/pt-mocap-lab:hands-02d71a92dc7d615870eb1c438c6ff1ad9bb1d6df` (branch `hands-fist`); both RunPod templates
+(`q06rkli9cz` sparring endpoint `n3emnmhsycwdzn`, `20k942w10w` production endpoint `gk1lt0rkaqdto9`) were pinned to it on 2026-11-17.
+Rollback tag (previous, estimate-only): `ghcr.io/ironmindai/pt-mocap-lab:hands-dc034f07717fed3431b287eb4e303a42045be3d5`. Measured on a
+real GPU: sparring clip (121 frames, scene) 52.6 s exec, single clip (147 frames) 40.5 s exec, with `hands: "fist"` (no HaMeR load).
+
 Fist constants (`hands.FIST_RIGHT`): MANO/SMPL-X right-hand absolute axis-angle of a real MANO training pose (`MANO_RIGHT.pkl`
 `hands_mean + hands_coeffs @ hands_components`, pose #515: tightly curled fingers, thumb folded over index/middle), rounded to 3
 decimals; the left hand is the x-mirror (`to_smplx_pose`: y, z negated). Checked by rendering the SMPL-X mesh (both hands) and by unit
