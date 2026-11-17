@@ -13,7 +13,9 @@ Input:
   smoothing     "medium" (default) | "light" | "strong" | "off": quaternion Savitzky-Golay smoothing of the
                 pose / root translation before export (applies to both BVH and GLB).
   return_smpl   bool, default false. Also return the raw SMPL-X params as base64 npz ("smpl_npz_b64").
-  hands         bool, default false (output identical to before). True adds HaMeR finger-pose estimation: the GLB mesh
+  hands         false|null (default, output identical to before) | true or "estimate" | "fist". "estimate" = HaMeR
+                finger-pose estimation; "fist" = no HaMeR at all (for gloved hands): a constant closed boxer's fist on both
+                hands for every frame, same SMPL-X GLB structure. Anything else is a bad request. With estimation the GLB mesh
                 becomes SMPL-X (22 body + 30 animated finger joints, same vertex-colour painting, same ground alignment);
                 works for glb_b64, per-person glb_b64 and scene_glb_b64. BVH is unchanged. If hand estimation fails the
                 normal (SMPL) output is returned with "hands_error".
@@ -109,19 +111,46 @@ def _patch_simple_vo():
     cls.solve = safe_solve
 
 
+def H_parse(value):
+    """Validate the `hands` input: None | "estimate" | "fist" (see hands.parse_hands_mode). ValueError -> bad request."""
+    from hands import parse_hands_mode
+
+    return parse_hands_mode(value)
+
+
+def _smplx_model():
+    """Lazy numpy SMPL-X (no HaMeR); used by both hand modes."""
+    if "smplx" not in _state:
+        import smplx_np as sx
+
+        _state["smplx"] = sx.load_smplx_npz(SMPLX_NPZ)
+    return _state["smplx"]
+
+
 def _hands_models():
-    """Lazy: HaMeR + MANO prior + numpy SMPL-X (only touched when hands=true)."""
+    """Lazy: HaMeR + MANO prior + numpy SMPL-X (only touched when hands is true / "estimate")."""
     if "hands" in _state:
         return _state["hands"]
     import hamer_infer
     import hands as H
-    import smplx_np as sx
 
     est = hamer_infer.HandEstimator(device="cuda")
     prior = H.HandPrior.from_mano_pkl(os.path.join(hamer_infer.HAMER_DATA, "_DATA/data/mano/MANO_RIGHT.pkl"))
-    smplx_model = sx.load_smplx_npz(SMPLX_NPZ)
-    _state["hands"] = (est, prior, smplx_model)
+    _state["hands"] = (est, prior, _smplx_model())
     return _state["hands"]
+
+
+def compute_fist(people):
+    """hands="fist": constant closed fist on both hands, every frame, no HaMeR. people: list of dicts with incam_global_orient
+    (T,3). Same result shape as compute_hands (left_aa/right_aa (T,15,3) SMPL-X convention, weight (T,2) = 1)."""
+    import hands as H
+
+    res = []
+    for d in people:
+        T = len(d["incam_global_orient"])
+        left, right = H.fist_pose(T)
+        res.append({"left_aa": left, "right_aa": right, "weight": np.ones((T, 2))})
+    return res, {"mode": "fist"}
 
 
 def _video_frames_rgb(path):
@@ -173,13 +202,15 @@ def hands_npz(res, fps, stride=1):
     import hands as H
     import smplx_np as sx
 
-    mdl = _hands_models()[2]
+    mdl = _smplx_model()
     arr = {"fps": np.float64(fps), "neutral_hand_left": H.to_smplx_pose(mdl["hands_mean_r"], True),
            "neutral_hand_right": mdl["hands_mean_r"], "stride": np.int64(stride)}
     for i, r in enumerate(res):
         arr[f"p{i}_left_hand_pose"] = r["left_aa"]
         arr[f"p{i}_right_hand_pose"] = r["right_aa"]
         arr[f"p{i}_weight"] = r["weight"]
+        if "raw_aa" not in r:  # fist mode: nothing was estimated
+            continue
         arr[f"p{i}_conf_raw"] = r["conf"]
         arr[f"p{i}_raw_left"] = H.to_smplx_pose(r["raw_aa"][:, 0], True)
         arr[f"p{i}_raw_right"] = r["raw_aa"][:, 1]
@@ -317,7 +348,8 @@ def handle_multi(inp, job, work, norm, name, t0):
     if gender not in GENDERS:
         raise ValueError(f"gender must be one of {GENDERS}")
     colors = inp.get("person_colors") or PERSON_COLORS
-    want_hands = bool(inp.get("hands"))
+    hands_mode = H_parse(inp.get("hands"))
+    want_hands = hands_mode is not None
     from hmr4d.utils.video_io_utils import get_video_lwh
 
     n_frames, width, height = get_video_lwh(norm)
@@ -439,14 +471,17 @@ def handle_multi(inp, job, work, norm, name, t0):
                 runpod.serverless.progress_update(job, "estimating hands")
             except Exception:
                 pass
-            hands_res, hinfo = compute_hands(norm, hand_people, K, width, height, job)
+            if hands_mode == "fist":
+                hands_res, hinfo = compute_fist(glob_params)
+            else:
+                hands_res, hinfo = compute_hands(norm, hand_people, K, width, height, job)
             out["hands"] = hinfo
             if inp.get("return_hands"):
                 out["hands_npz_b64"] = hands_npz(hands_res, MODEL_FPS)
             if not scene or inp.get("return_persons"):
                 import smplx_np as sx
 
-                mdl = _hands_models()[2]
+                mdl = _smplx_model()
                 for i, (r, gl, hr) in enumerate(zip(results, glob_params, hands_res)):
                     go, bp, tr = smooth_motion(gl["global_orient"], gl["body_pose"], gl["transl"], smoothing)
                     betas = np.asarray(gl["betas"], dtype=np.float64).reshape(-1, 10).mean(0)
@@ -480,7 +515,7 @@ def handle_multi(inp, job, work, norm, name, t0):
             model_smpl, scene_people, K, MODEL_FPS, smoothing, colors=inp.get("person_colors") or scn.DEFAULT_COLORS,
             track_ids=[p[0] for p in persons], observed=[p[2] for p in persons], bboxes=[p[1] for p in persons],
             hands=([(h["left_aa"], h["right_aa"]) for h in hands_res] if hands_res is not None else None),
-            smplx_model=(_hands_models()[2] if hands_res is not None else None))
+            smplx_model=(_smplx_model() if hands_res is not None else None))
         meta.update(width=width, height=height, gender_used=used, static_cam=static_cam, scene_s=round(time.time() - t_s, 1))
         out["scene_glb_b64"] = base64.b64encode(glb).decode()
         out["scene_meta"] = meta
@@ -511,6 +546,7 @@ def handler(job):
         smoothing = str(inp.get("smoothing", "medium")).lower()
         if smoothing not in SMOOTHING:
             raise ValueError(f"smoothing must be one of {SMOOTHING}")
+        H_parse(inp.get("hands"))  # fail fast on an invalid value, before any video work
         name = "job_" + (str(job.get("id") or uuid.uuid4()).replace("-", "")[:16])
 
         raw, norm = os.path.join(work, "raw_video"), os.path.join(work, "norm.mp4")
@@ -524,13 +560,15 @@ def handler(job):
             runpod.serverless.progress_update(job, "running GVHMR")
         except Exception:
             pass
-        want_hands = bool(inp.get("hands"))
+        hands_mode = H_parse(inp.get("hands"))
+        want_hands = hands_mode is not None
+        est_hands = hands_mode == "estimate"
         norm_copy = None
-        if want_hands:  # run_gvhmr moves the video away; keep a copy for the hand pass
+        if est_hands:  # run_gvhmr moves the video away; keep a copy for the hand pass
             norm_copy = os.path.join(work, "norm_hands.mp4")
             shutil.copy(norm, norm_copy)
         try:
-            if want_hands:
+            if est_hands:
                 params, inc_params, K_img = run_gvhmr(norm, work, name, static_cam, f_mm, with_incam=True)
             else:
                 params = run_gvhmr(norm, work, name, static_cam, f_mm)
@@ -568,14 +606,17 @@ def handler(job):
                     runpod.serverless.progress_update(job, "estimating hands")
                 except Exception:
                     pass
-                _, width, height = get_video_lwh(norm_copy)
-                hp_in = [{**{f"incam_{k}": v for k, v in inc_params.items()}, "observed": np.ones(len(go), dtype=bool)}]
-                hres, hinfo = compute_hands(norm_copy, hp_in, K_img, width, height, job)
+                if hands_mode == "fist":
+                    hres, hinfo = compute_fist([{"incam_global_orient": params["global_orient"]}])
+                else:
+                    _, width, height = get_video_lwh(norm_copy)
+                    hp_in = [{**{f"incam_{k}": v for k, v in inc_params.items()}, "observed": np.ones(len(go), dtype=bool)}]
+                    hres, hinfo = compute_hands(norm_copy, hp_in, K_img, width, height, job)
                 out["hands"] = hinfo
                 hr = hres[0]
                 if inp.get("return_hands"):
                     out["hands_npz_b64"] = hands_npz(hres, MODEL_FPS, stride)
-                mdl = _hands_models()[2]
+                mdl = _smplx_model()
                 out["glb_b64"] = base64.b64encode(sx.person_glb_ground(
                     mdl, np.asarray(betas, dtype=np.float64).reshape(-1, 10).mean(0), go, bp, tr, hr["left_aa"][sel], hr["right_aa"][sel], fps, top=None, gender=gender)).decode()
                 out["gender_used"] = "neutral (SMPL-X body model; gender affects clothing only)"

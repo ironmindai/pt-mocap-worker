@@ -2,7 +2,7 @@ name: build-and-push-lab
 
 on:
   push:
-    branches: [lab-multiperson-dual, sparring-scene, hands]
+    branches: [lab-multiperson-dual, sparring-scene, hands, hands-fist]
   workflow_dispatch:
 
 env:

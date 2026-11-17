@@ -124,7 +124,11 @@ pelvis_world_m (T x 3)}]`. Merge maths lives in `scene.py` (tests: `tests/test_s
 Adds per-finger pose estimation (HaMeR, MANO ViT-H) on top of GVHMR. Default `hands: false` = behaviour identical to before.
 
 Inputs (all modes: single-person `glb_b64`, multi-person per-person `glb_b64`, sparring `scene_glb_b64`):
-- `hands` bool - estimate fingers; the GLB mesh becomes **SMPL-X** (neutral; `gender` only affects the painted clothing).
+- `hands` - `false`/`null`/absent = off (default, behaviour identical to before); `true` or `"estimate"` = estimate fingers with HaMeR;
+  `"fist"` = **no HaMeR** (weights not loaded, no crops, much cheaper): both hands get a constant closed boxer's fist (thumb outside
+  over the fingers) on every frame - meant for gloved clips where HaMeR is unreliable. Anything else -> `{"error": "bad request: hands must be ..."}`
+  (validated before any video work). In all non-off modes the GLB mesh becomes **SMPL-X** (neutral; `gender` only affects the painted
+  clothing), same 52-node structure, painted clothing, scene/single/per-person paths and positions. `fist` returns `hands: {"mode": "fist"}`.
 - `return_hands` bool - also return `hands_npz_b64`.
 
 How it works: each fighter's camera-frame SMPL-X joints are projected with K to get a hand crop per hand (no detector); left hands
@@ -137,12 +141,18 @@ floor from the SMPL feet). Wrist orientation always comes from the body model.
 GLB skeleton (per figure, prefixed `fighter0_` / `fighter1_` in scenes): 52 nodes = the 22 SMPL body nodes (`Pelvis`, `L_Hip`, ..., `L_Wrist`,
 `R_Wrist`; no `L_Hand`/`R_Hand`) + 30 finger nodes `{L,R}_{Index,Middle,Pinky,Ring,Thumb}{1,2,3}` (first joint parented to the wrist),
 plus `SMPL_mesh`. One rotation track per node, ONE clip. Rotations are absolute local rotations from the SMPL-X template (flat hand =
-identity). Extra response keys: `hands` ({hand_crops, hamer_s, mean_weight}), `hands_error` (then the plain SMPL output is returned).
+identity). Extra response keys: `hands` (estimate: {hand_crops, hamer_s, mean_weight}; fist: {mode: "fist"}), `hands_error` (then the plain SMPL output is returned).
 
 `hands_npz_b64` keys (np.savez): per person `p{i}_left_hand_pose`, `p{i}_right_hand_pose` (T,15,3) SMPL-X axis-angle (fused; MANO joint order
 index, middle, pinky, ring, thumb x 3; left = right-equivalent with y,z negated), `p{i}_weight` (T,2) final blend weight [L,R]
 (1 = estimate, 0 = relaxed neutral), `p{i}_conf_raw`, `p{i}_raw_left`, `p{i}_raw_right` (unfused), `p{i}_kp_img` (T,2,21,2) HaMeR keypoints in
 image px, `p{i}_agree_deg`; `neutral_hand_left/right`, `fps`. For Mixamo retargeting use the (T,15,3) tracks + `weight`.
+
+Fist constants (`hands.FIST_RIGHT`): MANO/SMPL-X right-hand absolute axis-angle of a real MANO training pose (`MANO_RIGHT.pkl`
+`hands_mean + hands_coeffs @ hands_components`, pose #515: tightly curled fingers, thumb folded over index/middle), rounded to 3
+decimals; the left hand is the x-mirror (`to_smplx_pose`: y, z negated). Checked by rendering the SMPL-X mesh (both hands) and by unit
+tests (`tests/test_hands.py`). With `return_hands` and fist, `hands_npz_b64` only has `p{i}_left/right_hand_pose`, `p{i}_weight` (=1),
+`neutral_hand_*`, `fps`.
 
 ## Build
 

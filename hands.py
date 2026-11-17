@@ -20,6 +20,41 @@ ASPECT = 256.0 / 192.0       # BBOX_SHAPE [192, 256]
 HAND_BOX_M = 0.18            # side of the "tight hand box" in metres (fixed, so crops keep a stable scale)
 
 
+# ---------------------------------------------------------------- hands input / fist mode
+HANDS_MODES = ("estimate", "fist")
+
+
+def parse_hands_mode(value):
+    """`hands` input -> None (off: false / null) | "estimate" (true / "estimate") | "fist". Anything else -> ValueError."""
+    if value is None or value is False:
+        return None
+    if value is True:
+        return "estimate"
+    if isinstance(value, str) and value.strip().lower() in HANDS_MODES:
+        return value.strip().lower()
+    raise ValueError(f'hands must be false|null, true, "estimate" or "fist" (got {value!r})')
+
+
+# Closed boxer's fist, right-hand-equivalent absolute MANO/SMPL-X axis-angle (15 joints: index, middle, pinky, ring, thumb x 3).
+# Taken from a real MANO training pose (MANO_RIGHT.pkl `hands_mean + hands_coeffs @ hands_components`, pose #515: the pose with
+# tightly curled fingers - ~85-100 deg per joint about the local +z axis - whose thumb lies over the index / middle fingers'
+# middle phalanges, i.e. a boxer's fist with the thumb outside), rounded to 3 decimals. Verified by rendering the SMPL-X mesh
+# (see README / playground). The left hand is its x-mirror via `to_smplx_pose` (y, z negated).
+FIST_RIGHT = np.array([
+    [0.009, -0.346, 0.928], [0.176, 0.127, 1.749], [-0.053, 0.069, 0.757],     # index
+    [-0.499, -0.276, 1.524], [-0.166, -0.170, 1.291], [0.130, -0.043, 0.822],  # middle
+    [-1.420, 0.239, 1.505], [-0.128, 0.384, 0.903], [-0.270, 0.373, 2.050],    # pinky
+    [-0.400, 0.414, 1.624], [-0.560, 0.298, 1.120], [-0.252, -0.115, 1.049],   # ring
+    [0.847, -0.589, -0.196], [-0.637, 0.034, 0.006], [0.522, -0.063, 0.094],   # thumb
+])
+
+
+def fist_pose(T):
+    """(left, right) SMPL-X absolute axis-angle fist poses, each (T,15,3), constant over time."""
+    right = np.tile(FIST_RIGHT, (T, 1, 1))
+    return to_smplx_pose(right, True), right
+
+
 # ---------------------------------------------------------------- conventions
 def to_smplx_pose(aa_right_equiv, is_left):
     """(…,15,3) right-hand-equivalent axis-angle -> SMPL-X (left_hand_pose | right_hand_pose) axis-angle."""

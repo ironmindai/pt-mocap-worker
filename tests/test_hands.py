@@ -254,3 +254,56 @@ def test_person_glb_ground_runs_and_is_grounded():
     glb = sx.person_glb_ground(m, np.zeros(10), np.zeros((T, 3)), b, np.tile([0.3, 0, 0.3], (T, 1)), z, z, 30.0)
     js, _ = parse_glb(glb)
     assert len(js["skins"][0]["joints"]) == 52 and js["nodes"][0]["name"] == "Pelvis"
+
+
+# ---------------------------------------------------------------- hands input / fist mode
+@pytest.mark.parametrize("v,exp", [(None, None), (False, None), (True, "estimate"), ("estimate", "estimate"),
+                                   ("fist", "fist"), (" Fist ", "fist"), ("ESTIMATE", "estimate")])
+def test_parse_hands_mode_valid(v, exp):
+    assert H.parse_hands_mode(v) == exp
+
+
+@pytest.mark.parametrize("v", ["", "yes", "true", "false", "open", 0, 1, 2, [], {}, ["fist"], 1.0])
+def test_parse_hands_mode_invalid(v):
+    with pytest.raises(ValueError, match="hands must be"):
+        H.parse_hands_mode(v)
+
+
+def test_fist_pose_shape_constant_and_mirrored():
+    left, right = H.fist_pose(7)
+    assert left.shape == right.shape == (7, 15, 3)
+    assert np.allclose(right, right[0]) and np.allclose(left, left[0])
+    assert np.allclose(right[0], H.FIST_RIGHT)
+    assert np.allclose(left, right * H.MIRROR_AA)                      # x-mirror of the right fist
+    # as rotations the left joints are M R M
+    Rl = R.from_rotvec(left[0]).as_matrix()
+    assert np.allclose(Rl, H.mirror_rotmat(R.from_rotvec(right[0]).as_matrix()), atol=1e-9)
+
+
+def test_fist_constants_are_a_closed_fist_not_a_claw():
+    f = H.FIST_RIGHT
+    assert np.isfinite(f).all() and np.abs(f).max() < 2.5            # plausible joint angles (rad)
+    ang = np.linalg.norm(f[:12], axis=1).reshape(4, 3)               # index, middle, pinky, ring x (MCP, PIP, DIP) rotation angle
+    assert (ang > 0.7).all() and (ang < 2.3).all()                   # every joint clearly bent, none absurd
+    assert (ang.sum(1) > 3.2).all()                                  # total curl per finger > 180 deg: closed, not a claw
+    flat = H.fist_pose(1)[1][0]
+    assert np.abs(flat).max() > 0.5                                  # not the identity / flat hand
+
+
+@real
+def test_fist_geometry_real_smplx_both_hands_mirror_and_closed():
+    m = sx.load_smplx_npz(SMPLX_NPZ)
+    left, right = H.fist_pose(1)
+    rots = sx.rots_from_params(np.zeros((1, 3)), np.zeros((1, 63)), left, right)
+    root = sx.rest_shape(m, np.zeros(10))[1][0][None]
+    v, J = sx.posed(m, np.zeros(10), rots, root, vert_idx=np.arange(1))
+    J = J[0]
+    Lw, Rw = J[sx.L_WRIST], J[sx.R_WRIST]
+    PL = J[sx.L_FINGERS] - Lw
+    PR = J[sx.R_FINGERS] - Rw
+    assert np.abs(PL - PR * np.array([-1, 1, 1])).max() < 0.012     # both fists mirror each other (template asymmetry < 1.2 cm)
+    # fingertip joints (3rd joint of each non-thumb finger) end up close to the wrist (curled) vs ~0.09 m when flat
+    tips = np.linalg.norm(PR[[2, 5, 8, 11]], axis=1)
+    flat_r = sx.posed(m, np.zeros(10), sx.rots_from_params(np.zeros((1, 3)), np.zeros((1, 63))), root, vert_idx=np.arange(1))[1][0]
+    flat_tips = np.linalg.norm((flat_r[sx.R_FINGERS] - flat_r[sx.R_WRIST])[[2, 5, 8, 11]], axis=1)
+    assert (tips < 0.75 * flat_tips).all()
