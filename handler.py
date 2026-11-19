@@ -128,6 +128,16 @@ def _smplx_model():
     return _aux["smplx_np"]
 
 
+def _smplx_for_smpl_betas(smpl_betas):
+    """(SMPL-X model adapted to the GVHMR SMPL shape, fitted SMPL-X betas). SMPL betas are NOT valid SMPL-X betas."""
+    import smplx_np as sx
+
+    smpl, _ = get_smpl_model("neutral")
+    m2, bx, info = sx.adapt_model_to_smpl(_smplx_model(), smpl, np.asarray(smpl_betas, dtype=np.float64).reshape(-1, 10).mean(0))
+    print(f"[shape] SMPL->SMPL-X betas fit: {info}", flush=True)
+    return m2, bx
+
+
 def _hands_models():
     """Lazy: HaMeR + MANO prior + numpy SMPL-X (only touched when hands is true / "estimate")."""
     if "hands" in _state:
@@ -178,11 +188,11 @@ def compute_hands(norm_video, people, K, width, height, job=None):
     est, prior, mdl = _hands_models()
     persons = []
     for d in people:
-        betas = np.asarray(d["incam_betas"], dtype=np.float64).reshape(-1, 10).mean(0)
+        mdl_p, betas = _smplx_for_smpl_betas(d["incam_betas"])
         rots = sx.rots_from_params(d["incam_global_orient"], d["incam_body_pose"])
-        _, J = sx.rest_shape(mdl, betas)
+        _, J = sx.rest_shape(mdl_p, betas)
         root = J[0][None] + np.asarray(d["incam_transl"], dtype=np.float64)
-        _, j52 = sx.posed(mdl, betas, rots, root, vert_idx=np.arange(1))
+        _, j52 = sx.posed(mdl_p, betas, rots, root, vert_idx=np.arange(1))
         persons.append({"joints52": j52, "rots": rots, "observed": d.get("observed")})
     ests, info = hp.estimate_hands(_video_frames_rgb(norm_video), persons, est, prior, np.asarray(K, dtype=np.float64),
                                    width, height)
@@ -485,9 +495,9 @@ def handle_multi(inp, job, work, norm, name, t0):
                 mdl = _smplx_model()
                 for i, (r, gl, hr) in enumerate(zip(results, glob_params, hands_res)):
                     go, bp, tr = smooth_motion(gl["global_orient"], gl["body_pose"], gl["transl"], smoothing)
-                    betas = np.asarray(gl["betas"], dtype=np.float64).reshape(-1, 10).mean(0)
+                    mdl_p, betas = _smplx_for_smpl_betas(gl["betas"])
                     r["glb_b64"] = base64.b64encode(sx.person_glb_ground(
-                        mdl, betas, go, bp, tr, hr["left_aa"], hr["right_aa"], MODEL_FPS, color=colors[i % len(colors)],
+                        mdl_p, betas, go, bp, tr, hr["left_aa"], hr["right_aa"], MODEL_FPS, color=colors[i % len(colors)],
                         top=False, gender="male")).decode()
                     r["gender_used"] = "neutral (SMPL-X)"
         except Exception as e:  # noqa: BLE001  (hand failure must not lose the body result)
@@ -617,9 +627,9 @@ def handler(job):
                 hr = hres[0]
                 if inp.get("return_hands"):
                     out["hands_npz_b64"] = hands_npz(hres, MODEL_FPS, stride)
-                mdl = _smplx_model()
+                mdl, betas_x = _smplx_for_smpl_betas(betas)
                 out["glb_b64"] = base64.b64encode(sx.person_glb_ground(
-                    mdl, np.asarray(betas, dtype=np.float64).reshape(-1, 10).mean(0), go, bp, tr, hr["left_aa"][sel], hr["right_aa"][sel], fps, top=None, gender=gender)).decode()
+                    mdl, betas_x, go, bp, tr, hr["left_aa"][sel], hr["right_aa"][sel], fps, top=None, gender=gender)).decode()
                 out["gender_used"] = "neutral (SMPL-X body model; gender affects clothing only)"
                 hands_done = True
             except Exception as e:  # noqa: BLE001  (hand failure falls back to the plain SMPL GLB)

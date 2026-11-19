@@ -147,6 +147,16 @@ def sharpness(patch_rgb):
 
 
 # ---------------------------------------------------------------- confidence
+# Quality thresholds (HaMeR gives stiff, splayed fingers when the hand is occluded, e.g. resting on the head).
+AGREE_LO_DEG = 45.0        # hand-model vs body-model wrist disagreement: fully trusted below this ...
+AGREE_HI_DEG = 90.0        # ... and rejected (confidence 0) above this. Was 60/120: too lenient for occluded contact.
+CONF_BLEND_LO = 0.35       # frame confidence at/below which the estimate gets zero weight (relaxed neutral hand)
+CONF_BLEND_HI = 0.80       # frame confidence at/above which the estimate is fully trusted; in between = partial blend
+FUSE_THRESH = 0.35         # frames below this are "missing" (bridged / held / faded to neutral), see fuse_hand
+FINGER_SMOOTH_WINDOW = 9   # quaternion SavGol window (frames @30 fps) for finger poses; was 5
+MAX_EST_WEIGHT = 0.9       # never trust HaMeR 100%: keeps a little relaxed-hand curl, damps splay
+
+
 def wrist_agreement_deg(R_body_wrist, R_hand_wrist):
     """Angle (deg) between the body model's wrist orientation and the hand model's, both in the camera frame."""
     rel = np.swapaxes(R_body_wrist, -1, -2) @ R_hand_wrist
@@ -165,7 +175,7 @@ def frame_confidence(vis, sharp, agree_deg, observed=None):
     sharp = np.asarray(sharp, dtype=np.float64)
     med = np.median(sharp[sharp > 0]) if (sharp > 0).any() else 1.0
     s = np.clip(sharp / (0.30 * med), 0, 1)
-    c = np.clip(np.asarray(vis) / 0.6, 0, 1) * s * _ramp(agree_deg, 60.0, 120.0)
+    c = np.clip(np.asarray(vis) / 0.6, 0, 1) * s * _ramp(agree_deg, AGREE_LO_DEG, AGREE_HI_DEG)
     if observed is not None:
         c = c * np.asarray(observed, dtype=bool)
     return c
@@ -210,21 +220,26 @@ def _quat_continuous(q):
     return q
 
 
-def fuse_hand(aa, conf, neutral, prior=None, thresh=0.25, max_gap=15, hold_tau=10.0, window=5, outlier_rad=1.0):
+def fuse_hand(aa, conf, neutral, prior=None, thresh=FUSE_THRESH, max_gap=15, hold_tau=10.0, window=FINGER_SMOOTH_WINDOW,
+              outlier_rad=1.0):
     """One hand over time. aa (T,15,3) right-hand-equivalent absolute poses, conf (T,) in [0,1], neutral (15,3) relaxed
     pose. Returns (pose (T,15,3), weight (T,)) where weight is the final blend weight of the estimate vs the neutral hand.
 
     1) clamp to the anatomical prior; 2) frames below `thresh` (and temporal outliers vs a running median) are treated
     as missing; 3) gaps up to `max_gap` frames are bridged by quaternion interpolation, longer gaps (and the clip ends)
     hold the last good pose with exponentially decaying weight (tau = `hold_tau` frames) towards the neutral hand;
-    4) quaternion Savitzky-Golay (sign-continuous); 5) final = nlerp(neutral, estimate, smoothed weight)."""
+    4) quaternion Savitzky-Golay (sign-continuous); 5) final = nlerp(neutral, estimate, smoothed weight).
+    Per-frame confidence is first mapped to a blend weight (CONF_BLEND_LO..HI ramp, capped at MAX_EST_WEIGHT), so an unreliable
+    frame is pulled towards the relaxed neutral hand instead of being trusted as is."""
     T = len(aa)
     aa = np.asarray(aa, dtype=np.float64).copy()
     conf = np.clip(np.asarray(conf, dtype=np.float64), 0, 1)
+    conf_raw = conf
+    conf = MAX_EST_WEIGHT * np.clip((conf - CONF_BLEND_LO) / (CONF_BLEND_HI - CONF_BLEND_LO), 0, 1)
     if prior is not None:
         aa = prior.clamp(aa)
     q = R.from_rotvec(aa.reshape(-1, 3)).as_quat().reshape(T, 15, 4)
-    good = conf >= thresh
+    good = conf_raw >= thresh
     # temporal outliers: pose far (mean joint angle) from the median of its neighbours
     if good.sum() >= 5:
         idx = np.where(good)[0]

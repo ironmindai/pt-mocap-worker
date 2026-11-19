@@ -101,7 +101,7 @@ def estimate_hands(frames, persons, estimator, prior, K, width, height, passes=2
     return out, info
 
 
-def fuse_person(est, neutral_r, prior=None, window=5, **kw):
+def fuse_person(est, neutral_r, prior=None, window=H.FINGER_SMOOTH_WINDOW, **kw):
     """est: one dict from estimate_hands. -> left_aa, right_aa (T,15,3) in SMPL-X convention (absolute), w (T,2) blend weights."""
     T = len(est["conf"])
     poses, ws = [], []

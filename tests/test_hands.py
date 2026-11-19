@@ -117,8 +117,26 @@ def test_fuse_high_confidence_follows_estimate_and_bridges_gaps():
     conf[10:14] = 0.0                                         # short gap -> bridged
     aa[10:14] = 0.0                                           # garbage inside the gap must not leak
     pose, w = H.fuse_hand(aa, conf, NEUTRAL, window=5)
-    assert np.allclose(pose[5:36, :, 2], 1.4, atol=0.05)
+    expect = H.MAX_EST_WEIGHT * 1.4 + (1 - H.MAX_EST_WEIGHT) * NEUTRAL[:, 2]   # estimate is capped at MAX_EST_WEIGHT
+    assert np.allclose(pose[5:36, :, 2], expect[None], atol=0.05)
     assert w[10:14].min() > 0.8
+
+
+def test_fuse_unreliable_frames_blend_to_neutral():
+    T = 40
+    aa = _fist(T)
+    conf = np.full(T, 0.9)
+    conf[15:25] = 0.45                                        # mediocre (occluded contact): partial blend, not full trust
+    pose, w = H.fuse_hand(aa, conf, NEUTRAL)
+    assert w[20] < 0.5 * w[5] and w[20] > 0
+    low = np.full(T, H.FUSE_THRESH - 0.05)
+    _, w2 = H.fuse_hand(aa, low, NEUTRAL)
+    assert np.allclose(w2, 0)                                 # unreliable everywhere -> pure relaxed hand
+
+
+def test_agreement_ramp_is_stricter():
+    c = H.frame_confidence(np.ones(3), np.ones(3), np.array([30.0, 70.0, 100.0]))
+    assert c[0] == 1 and 0 < c[1] < 1 and c[2] == 0
 
 
 def test_fuse_long_gap_decays_to_neutral_and_never_wild():
@@ -144,7 +162,8 @@ def test_fuse_rejects_single_frame_outlier_and_is_smooth():
     assert d.max() < 0.1                                      # no flicker
 
 
-def test_fuse_sign_continuity_near_pi():
+def test_fuse_sign_continuity_near_pi(monkeypatch):
+    monkeypatch.setattr(H, "MAX_EST_WEIGHT", 1.0)             # tests the quaternion filter itself (a capped nlerp towards a neutral is ambiguous at exactly pi)
     T = 20
     ang = np.linspace(3.0, 3.3, T)                            # crosses pi: axis-angle flips, quaternion must not
     aa = np.zeros((T, 15, 3))

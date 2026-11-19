@@ -52,7 +52,12 @@ def rest_shape(model, betas):
     betas = np.asarray(betas, dtype=np.float64)
     betas = (betas.reshape(-1, betas.shape[-1]).mean(0) if betas.ndim > 1 else betas)[: model["shapedirs"].shape[2]]
     v = model["v_template"] + np.einsum("vcd,d->vc", model["shapedirs"][:, :, : len(betas)], betas)
-    return v, model["J_regressor"] @ v
+    J = model["J_regressor"] @ v
+    hs = model.get("head_scale")      # set by adapt_model_to_smpl: SMPL-length neck->head bone (head pivot only, mesh untouched)
+    if hs is not None:
+        J = J.copy()
+        J[15] = J[12] + (J[15] - J[12]) * hs
+    return v, J
 
 
 def rots_from_params(go, bp, left_hand=None, right_hand=None):
@@ -120,3 +125,51 @@ def person_glb_ground(model, betas, go, bp, tr, left_hand, right_hand, fps, colo
     if not sg.clothing_is_visible(colors):
         colors = np.concatenate([np.tile(sg.SKIN, (len(v), 1)), np.ones((len(v), 1))], axis=1)
     return sg.build_glb(v, model["faces"], J, PARENTS_52, model["weights"], to_quats(rots), root, fps, NAMES_52, colors)
+
+
+# ---------------------------------------------------------------- SMPL -> SMPL-X shape transfer
+SPINE_HEAD_JOINTS = (3, 6, 9, 12, 15)   # extra weight in the beta fit so torso height is matched tightly
+BETA_RIDGE = 1e-3                       # keeps the 10 fitted betas small / well conditioned
+
+
+def _smpl_rest_joints(smpl_model, betas, n=22):
+    b = np.asarray(betas, dtype=np.float64)
+    b = (b.reshape(-1, b.shape[-1]).mean(0) if b.ndim > 1 else b)[: smpl_model["shapedirs"].shape[2]]
+    v = smpl_model["v_template"] + np.einsum("vcd,d->vc", smpl_model["shapedirs"][:, :, : len(b)], b)
+    return (smpl_model["J_regressor"] @ v)[:n]
+
+
+def adapt_model_to_smpl(model, smpl_model, smpl_betas):
+    """SMPL betas must NOT be fed to the SMPL-X shape basis (different basis: avatar came out ~7% too large).
+    Instead fit SMPL-X betas so that the *shape-induced change* of the 22 body joints (pelvis-relative, vs the neutral
+    template of each model) equals the one SMPL predicts (least squares through the linear map J_regressor @ shapedirs).
+    Working on the change keeps each model's own joint conventions (the SMPL-X head joint sits ~4 cm higher than SMPL's).
+    That residual convention gap is removed by sliding the SMPL-X head joint along the neck->head bone until pelvis-to-head equals SMPL's (`head_scale`, applied in
+    rest_shape; the mesh is untouched, only the head pivot moves down like in SMPL).
+    Returns (model2 (shallow copy carrying head_scale), betas_x (nb,), info)."""
+    nb = model["shapedirs"].shape[2]
+    t_smpl = _smpl_rest_joints(smpl_model, smpl_betas)
+    t0_smpl = _smpl_rest_joints(smpl_model, np.zeros(1))
+    target = (t_smpl - t_smpl[0]) - (t0_smpl - t0_smpl[0])
+    JD = np.einsum("jv,vcd->jcd", model["J_regressor"][:22], model["shapedirs"])
+    JD = JD - JD[0][None]
+    w = np.ones(22)
+    w[list(SPINE_HEAD_JOINTS)] = 4.0
+    A = (JD * w[:, None, None]).reshape(-1, nb)
+    b = (target * w[:, None]).reshape(-1)
+    x = np.linalg.solve(A.T @ A + BETA_RIDGE * np.eye(nb), A.T @ b)
+    m0 = dict(model)
+    _, Jx = rest_shape(m0, x)
+    # head pivot: slide J15 along the SMPL-X neck->head direction until pelvis-to-head equals the SMPL pelvis-to-head
+    d = Jx[15] - Jx[12]
+    c = Jx[12] - Jx[0]
+    L = float(np.linalg.norm(t_smpl[15] - t_smpl[0]))
+    # |c + s d| = L  ->  (d.d) s^2 + 2 (c.d) s + (c.c - L^2) = 0, positive root
+    qa, qb, qc = float(d @ d), 2 * float(c @ d), float(c @ c) - L * L
+    m0["head_scale"] = (-qb + np.sqrt(max(qb * qb - 4 * qa * qc, 0.0))) / (2 * qa)
+    _, Jf = rest_shape(m0, x)
+    ph = lambda j: float(np.linalg.norm(j[15] - j[0]))  # noqa: E731
+    info = {"pelvis_head_smpl": ph(t_smpl), "pelvis_head_smplx": ph(Jf), "head_scale": m0["head_scale"],
+            "pelvis_head_smplx_raw_betas": ph(rest_shape(model, np.pad(np.asarray(smpl_betas, dtype=np.float64).reshape(-1, 10).mean(0), (0, max(nb - 10, 0))))[1]),
+            "rms_joint_delta_err_m": float(np.sqrt(((JD @ x - target) ** 2).sum(1).mean()))}
+    return m0, x, info
